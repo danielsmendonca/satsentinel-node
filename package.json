@@ -1,0 +1,31 @@
+{
+  "name": "satsentinel-node",
+  "version": "1.3.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/runner.js",
+    "ui": "node dist/src/ui/server.js",
+    "test": "node --test test/*.mjs",
+    "pairing:show": "node dist/src/identity/operator.js --show"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.4.0",
+    "@noble/hashes": "^1.5.0",
+    "@satsentinel/protocol": "file:./protocol",
+    "bip39": "^3.1.0",
+    "fastify": "^5.2.0",
+    "geotiff": "^2.1.3",
+    "h3-js": "^4.5.0",
+    "proj4": "^2.22.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

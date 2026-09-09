@@ -1,0 +1,32 @@
+{
+  "name": "@satsentinel/protocol",
+  "version": "1.3.0",
+  "description": "Contrato tipado unico entre satsentinel-server e satsentinel-node (GDD v1.2 Sec 18). Validade com Zod em ambos os lados.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test/smoke.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.4.0",
+    "@noble/hashes": "^1.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

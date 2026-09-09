@@ -1,0 +1,147 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ndvi, detectWindow } from '../dist/src/pipeline/ndvi.js';
+import { components, pixelBboxToRing, maskToMultiPolygon } from '../dist/src/pipeline/vectorize.js';
+import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
+import { computeWindow, resampleNearest, extentToUtm } from '../dist/src/fetcher/windows.js';
+import { isValidScl } from '../dist/src/pipeline/scl.js';
+import { ChunkCache, coalescedGet } from '../dist/src/fetcher/cog.js';
+import { fromMnemonic, importPairing } from '../dist/src/identity/operator.js';
+import { mapLimit } from '../dist/src/ui/server.js';
+import { generateMnemonic } from 'bip39';
+
+test('ndvi queda detecta anomalia; sem queda nao detecta', () => {
+  const n = 8 * 8; // >= MIN_COMPONENT_PX (50)
+  const red = new Float32Array(n).fill(800);
+  const nirBase = new Float32Array(n).fill(4000);
+  const nirNow = new Float32Array(n).fill(2500);
+  const base = ndvi(red, nirBase);
+  const hit = detectWindow(red, nirNow, new Uint8Array(n).fill(4), [base, base]);
+  assert.ok(hit.count > 0 && hit.uncalibrated > 0.3);
+  const miss = detectWindow(red, nirBase, new Uint8Array(n).fill(4), [base, base]);
+  assert.equal(miss.count, 0);
+});
+
+test('sweep dNDVI [-0.12,-0.15,-0.20] e monotonico (guia tuning Fase 0)', () => {
+  // base NDVI = 0.667; metade forte (d~-0.24), metade media (d~-0.13)
+  const n = 16 * 16;
+  const red = new Float32Array(n).fill(800);
+  const nirBase = new Float32Array(n).fill(4000);
+  const base = ndvi(red, nirBase);
+  const nirNow = new Float32Array(n);
+  for (let i = 0; i < n / 2; i++) nirNow[i] = 2000;
+  for (let i = n / 2; i < n; i++) nirNow[i] = 2650;
+  const scl = new Uint8Array(n).fill(4);
+  const c = (thr) => detectWindow(red, nirNow, scl, [base, base], 'DEFORESTATION', { dndviThreshold: thr }).count;
+  const c12 = c(-0.12), c15 = c(-0.15), c20 = c(-0.20);
+  assert.equal(c12, 256);
+  assert.equal(c15, 128);
+  assert.equal(c20, 128);
+});
+
+test('SCL mascara nuvem/sombra; agua so vale p/ WATER', () => {
+  assert.equal(isValidScl(9, 'DEFORESTATION'), false);
+  assert.equal(isValidScl(4, 'DEFORESTATION'), true);
+  assert.equal(isValidScl(6, 'DEFORESTATION'), false);
+  assert.equal(isValidScl(6, 'WATER_BODY_CHANGE'), true);
+});
+
+test('area minima 50px filtra ruido', () => {
+  const n = 8 * 8; // 64px mas so 10 anomalos
+  const red = new Float32Array(n).fill(800);
+  const nirB = new Float32Array(n).fill(4000);
+  const nirN = new Float32Array(n).fill(4000);
+  for (let i = 0; i < 10; i++) nirN[i] = 2000;
+  const base = ndvi(red, nirB);
+  const r = detectWindow(red, nirN, new Uint8Array(n).fill(4), [base, base]);
+  assert.equal(r.count, 0);
+});
+
+test('coalescing agrupa ranges proximos e usa cache', async () => {
+  let calls = 0;
+  const get = async (_u, s, e) => { calls++; return new Uint8Array(e - s + 1).fill(7); };
+  const cache = new ChunkCache();
+  const out = await coalescedGet('http://x', [[0, 99], [100, 199]], get, cache);
+  assert.equal(calls, 1);
+  assert.equal(out[0].length, 100);
+  await coalescedGet('http://x', [[0, 99]], get, cache);
+  assert.equal(calls, 1); // cache
+});
+
+test('pareamento por mnemonic e deterministico; import valida', () => {
+  const m = generateMnemonic(128);
+  const a = fromMnemonic(m);
+  const b = fromMnemonic(m);
+  assert.equal(a.operator_id, b.operator_id);
+  assert.equal(a.private_key_hex, b.private_key_hex);
+  assert.throws(() => importPairing('{"a":1}', 'test-tmp-cfg'), /invalido/);
+});
+
+test('mgrs -> UTM (sul e norte, id como fallback)', () => {
+  assert.deepEqual(
+    ((z) => [z.zone, z.south, z.epsg])(utmFromMgrs('23KPR')),
+    [23, true, 32723],
+  );
+  assert.deepEqual(
+    ((z) => [z.zone, z.south, z.epsg])(utmFromMgrs('32TQR')),
+    [32, false, 32632],
+  );
+  assert.equal(parseMgrsTile('S2B_23KPR_20260904_0_L2A', {}), '23KPR');
+  assert.equal(parseMgrsTile('x', { 's2:mgrs_tile': '22MGB' }), '22MGB');
+  assert.throws(() => utmFromMgrs('UNKNOWN'), /MGRS invalido/);
+});
+
+test('extent 4326 -> metros UTM tem ordem e tamanho plausiveis', () => {
+  const m = extentToUtm([-55, -11, -54, -10], '+proj=utm +zone=23 +south +datum=WGS84 +units=m +no_defs');
+  assert.ok(m[0] < m[2] && m[1] < m[3]);
+  assert.ok(m[2] - m[0] > 100000 && m[2] - m[0] < 130000); // ~1 grau lon a -10.5
+  assert.ok(m[3] - m[1] > 100000 && m[3] - m[1] < 120000);
+});
+
+test('computeWindow ancora no halo e clampa na imagem', () => {
+  // imagem 1000x1000px de 10m, origem (500000, 8900000)
+  const w = computeWindow(500000, 8900000, 10, 500000, 8890000, 510000, 8900000, 505000, 8895000, 505100, 8895100, 0);
+  assert.deepEqual([w.left, w.top, w.width, w.height], [500, 490, 10, 10]);
+  // halo expande e clamp segura borda: left encosta no 0, top fica em 495
+  const w2 = computeWindow(500000, 8900000, 10, 500000, 8890000, 510000, 8900000, 500000, 8890000, 500050, 8890050, 5000);
+  assert.deepEqual([w2.left, w2.top, w2.width, w2.height], [0, 495, 505, 505]);
+});
+
+test('resampleNearest mapeia pelo centro do pixel', () => {
+  const src = { data: Uint8Array.from([1, 2, 3, 4]), width: 2, height: 2, res: 20, originX: 0, originY: 40 };
+  const out = resampleNearest(src, 4, 4, 0, 40, 10);
+  assert.deepEqual([...out.slice(0, 2)], [1, 1]);
+  assert.deepEqual([...out.slice(8, 10)], [3, 3]);
+});
+
+test('vetorizacao: 2 manchas 8x8, diagonal nao conecta, anel fecha em lon/lat', () => {
+  const W = 20, H = 20;
+  const mask = new Uint8Array(W * H);
+  const sq = (c0, r0) => { for (let r = r0; r < r0 + 8; r++) for (let c = c0; c < c0 + 8; c++) mask[r * W + c] = 1; };
+  sq(1, 1); sq(11, 11);
+  mask[5 * W + 5] = 1; // pixel isolado: diagonal nao conecta em 4-vizinhanca
+  const comps = components(mask, W, H, 50);
+  assert.equal(comps.length, 2); // 8x8=64px cada; o pixel solto (1px) filtrado
+  assert.deepEqual([comps[0].c0, comps[0].r0, comps[0].c1, comps[0].r1], [1, 1, 8, 8]);
+  const utm21s = '+proj=utm +zone=21 +south +datum=WGS84 +units=m +no_defs';
+  const ring = pixelBboxToRing(1, 1, 8, 8, 500000, 8840000, 10, utm21s);
+  assert.equal(ring.length, 5);
+  assert.deepEqual(ring[0], ring[4]);
+  assert.ok(ring[0][0] < -56.5 && ring[0][0] > -57.5 && ring[0][1] < -10 && ring[0][1] > -11);
+  const mp = maskToMultiPolygon(mask, W, H, 500000, 8840000, 10, utm21s, 50);
+  assert.equal(mp.type, 'MultiPolygon');
+  assert.equal(mp.coordinates.length, 2);
+  assert.equal(maskToMultiPolygon(new Uint8Array(W * H), W, H, 500000, 8840000, 10, utm21s, 50), null);
+});
+
+test('mapLimit respeita concorrencia e preserva indices', async () => {
+  let live = 0, peak = 0;
+  const out = await mapLimit([0, 1, 2, 3, 4, 5, 6, 7], 3, async (x) => {
+    live++; peak = Math.max(peak, live);
+    await new Promise((r) => setTimeout(r, 10));
+    live--;
+    return x * 2;
+  });
+  assert.deepEqual(out, [0, 2, 4, 6, 8, 10, 12, 14]);
+  assert.ok(peak <= 3 && peak > 1);
+});

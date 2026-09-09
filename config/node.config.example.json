@@ -1,0 +1,8 @@
+{
+  "node_id": "00000000-0000-4000-8000-000000000000",
+  "operator_id": "TODO-preenchido-no-primeiro-boot",
+  "node_alias": "rack-pi4",
+  "server_url": "http://localhost:8080",
+  "max_ram_mb": 1024,
+  "local_priority": true
+}
