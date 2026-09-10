@@ -84,7 +84,12 @@ async function runSample(alert, idx, biome, row, expectZero = false) {
     sortby: [{ field: 'properties.datetime', direction: 'desc' }],
     limit: 6,
   });
-  const bases = prev.filter((p) => p.id !== t0.id).slice(0, 3);
+  const bases = prev
+    .filter((p) => p.id !== t0.id)
+    // Producao exige MESMO tile (GDD Sec 7); cross-tile contamina a mediana com
+    // nodata (debug blinds: mediana 0.0 -> dNDVI +0.5 ficticio). Opt-out: SAME_TILE=0.
+    .filter((p) => process.env.SAME_TILE === '0' || (p.id.match(/_(\d{2}[A-Z]{3})_/)?.[1] ?? '') === (t0.id.match(/_(\d{2}[A-Z]{3})_/)?.[1] ?? ''))
+    .slice(0, 3);
   if (bases.length < 2) { console.log('  SKIP: sem 2 baselines'); return 'skip'; }
   console.log(`  bases: ${bases.map((b) => b.id.slice(0, 21)).join(', ')}`);
   const urls = (f) => ({ B04: pick(f.assets, 'red', 'B04', 'b04'), B08: pick(f.assets, 'nir', 'nir08', 'B08', 'b08'), SCL: pick(f.assets, 'scl', 'SCL', 'scl') });
