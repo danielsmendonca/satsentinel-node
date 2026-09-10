@@ -20,6 +20,9 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      # o contrato file:./protocol precisa do dist compilado antes do build raiz
+      - run: npm ci --no-audit --no-fund --prefix protocol
+      - run: npm run build --prefix protocol
       - run: npm ci --no-audit --no-fund
       - run: npm run build
       - run: npm test
