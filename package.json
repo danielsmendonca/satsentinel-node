@@ -6,7 +6,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/runner.js",
     "ui": "node dist/src/ui/server.js",
-    "test": "node --test test/*.mjs",
+    "test": "node --test test/",
     "digest": "node ./scripts/digest.mjs",
     "pin": "node ./scripts/pin.mjs",
     "pairing:show": "node dist/src/identity/operator.js --show"
