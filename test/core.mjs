@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ndvi, detectWindow, MIN_VALID_FRAC } from '../dist/src/pipeline/ndvi.js';
+import { ndvi, detectWindow, MIN_VALID_FRAC, erodeValidMask } from '../dist/src/pipeline/ndvi.js';
 import { components, pixelBboxToRing, maskToMultiPolygon, traceContour, simplifyRing, snapRing } from '../dist/src/pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
 import { computeWindow, resampleNearest, extentToUtm } from '../dist/src/fetcher/windows.js';
@@ -18,6 +18,38 @@ import { generateMnemonic } from 'bip39';
 
 test('piso ceu-limpo trava em 0.6 (tuning DETER R2: mata FPs de borda sem perder TPs)', () => {
   assert.equal(MIN_VALID_FRAC, 0.6);
+});
+
+test('erosao 1px limpa borda e mantem interior; linha fina some', () => {
+  const w = 5, full = new Uint8Array(w * w).fill(1);
+  const e = erodeValidMask(full, w);
+  let c = 0; for (const v of e) c += v;
+  assert.equal(c, 9); // interior 3x3
+  assert.equal(e[0], 0); // canto da janela sempre invalido
+  const hole = Uint8Array.from(full); hole[12] = 0; // furo central
+  const eh = erodeValidMask(hole, w);
+  let ch = 0; for (const v of eh) ch += v;
+  assert.equal(ch, 0); // vizinhos do furo caem (8-conectividade)
+  const line = new Uint8Array(w * w); // linha horizontal fina = tipico artefato de borda
+  for (let x = 0; x < w; x++) line[2 * w + x] = 1;
+  const el = erodeValidMask(line, w);
+  let cl = 0; for (const v of el) cl += v;
+  assert.equal(cl, 0);
+});
+
+test('detectWindow com erodeValid detecta bloco grande e ignora faixa fina', () => {
+  const w = 12, n = w * w;
+  const red = new Float32Array(n).fill(800);
+  const nirBase = new Float32Array(n).fill(4000);
+  const nirNow = new Float32Array(n).fill(2500);
+  const base = ndvi(red, nirBase);
+  const scl = new Uint8Array(n).fill(4);
+  const hit = detectWindow(red, nirNow, scl, [base, base], 'DEFORESTATION', { width: w, erodeValid: true });
+  assert.ok(hit.count === 100 && hit.validFracT0 > 0.6); // interior 10x10
+  const thin = new Uint8Array(n); // so 1 linha valida com queda
+  for (let x = 0; x < w; x++) thin[x] = 1;
+  const miss = detectWindow(red, nirNow, thin.map((v) => (v ? 4 : 0)), [base, base], 'DEFORESTATION', { width: w, erodeValid: true });
+  assert.equal(miss.count, 0);
 });
 
 test('ndvi queda detecta anomalia; sem queda nao detecta', () => {

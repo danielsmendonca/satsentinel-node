@@ -129,7 +129,8 @@ async function runSample(alert, idx, biome, row, expectZero = false) {
   const MINPX = Number(process.env.MINPX ?? 50);
   const LOW_VALID = Number(process.env.LOW_VALID ?? 0.6);
   const det = detectWindow(red, nir, scl, baseNdvis, 'DEFORESTATION',
-    { dndviThreshold: TH, minPx: MINPX, ...(process.env.FOREST_GATE ? { requireForest: true, forest: forestMask(baseScls) } : {}) });
+    { dndviThreshold: TH, minPx: MINPX, ...(process.env.FOREST_GATE ? { requireForest: true, forest: forestMask(baseScls) } : {}), width: ref.width, erodeValid: process.env.ERODE === '1' });
+  if (process.env.ERODE === '1') row.erode = 1;
   console.log(`  valid=${(det.validFracT0 * 100).toFixed(0)}% px_anomalos=${det.count} score=${det.uncalibrated.toFixed(2)}`);
   row.valid = +det.validFracT0.toFixed(3); row.count = det.count; row.score = +det.uncalibrated.toFixed(3);
   if (det.validFracT0 < LOW_VALID) {

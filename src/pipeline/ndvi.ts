@@ -19,6 +19,28 @@ export function ndvi(red: Float32Array, nir: Float32Array): Float32Array {
   return out;
 }
 
+/** Erosao morfologica 1px (8-conectividade) da mascara valida: descarta pixels
+ *  de borda de nuvem/haze que o SCL rotula como vegetacao mas estao
+ *  contaminados (causa raiz dos FPs em mata estavel, tuning DETER R4).
+ *  Bordas da janela viram invalidas (conservador). Requer width real. */
+export function erodeValidMask(valid: Uint8Array, width: number): Uint8Array {
+  const h = Math.floor(valid.length / width);
+  const out = new Uint8Array(valid.length);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      if (!valid[i]) continue;
+      let ok = 1;
+      for (let dy = -1; dy <= 1 && ok; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!valid[i + dy * width + dx]) { ok = 0; break; }
+        }
+      }
+      out[i] = ok;
+    }
+  }
+  return out;
+}
 export function median3(a: Float32Array, b: Float32Array, c: Float32Array): Float32Array {
   const out = new Float32Array(a.length);
   for (let i = 0; i < a.length; i++) {
@@ -40,7 +62,7 @@ export interface WindowResult {
 export function detectWindow(
   red: Float32Array, nir: Float32Array, scl: Uint8Array,
   baselineNdvis: Float32Array[], cls: EventClass = 'DEFORESTATION',
-  opts: { dndviThreshold?: number; minPx?: number; requireForest?: boolean; forest?: Uint8Array } = {},
+  opts: { dndviThreshold?: number; minPx?: number; requireForest?: boolean; forest?: Uint8Array; erodeValid?: boolean; width?: number } = {},
 ): WindowResult {
   const thr = opts.dndviThreshold ?? DNDVI_THRESHOLD;
   const minPx = opts.minPx ?? MIN_COMPONENT_PX;
@@ -48,7 +70,21 @@ export function detectWindow(
   // mascara fornecida, nao filtra (compat: testes e caminhos sem SCL historico).
   const gate = opts.requireForest === true && opts.forest && opts.forest.length === red.length;
   const n = red.length;
-  const vf = validFrac(scl, cls);
+  // Erosao opt-in (validacao R4; producao apos prova): constroi mascara valida,
+  // erode 1px e usa a erodida tanto no loop quanto na fracao reportada.
+  const erode = opts.erodeValid === true && (opts.width ?? 0) > 2;
+  let valid: Uint8Array | undefined;
+  let vf: number;
+  if (erode) {
+    valid = new Uint8Array(n);
+    for (let i = 0; i < n; i++) valid[i] = isValidScl(scl[i], cls) ? 1 : 0;
+    valid = erodeValidMask(valid, opts.width as number);
+    let c = 0;
+    for (let i = 0; i < n; i++) c += valid[i];
+    vf = c / n;
+  } else {
+    vf = validFrac(scl, cls);
+  }
   const cur = ndvi(red, nir);
   const med = baselineNdvis.length >= 3
     ? median3(baselineNdvis[0], baselineNdvis[1], baselineNdvis[2])
@@ -58,7 +94,7 @@ export function detectWindow(
   const mask = new Uint8Array(n);
   let sum = 0; let cnt = 0;
   for (let i = 0; i < n; i++) {
-    if (!isValidScl(scl[i], cls)) continue;
+    if (valid ? !valid[i] : !isValidScl(scl[i], cls)) continue;
     if (gate && !(opts.forest as Uint8Array)[i]) continue;
     const d = cur[i] - med[i];
     if (d < thr) { mask[i] = 1; sum += d; cnt++; }
