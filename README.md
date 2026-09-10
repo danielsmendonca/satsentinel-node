@@ -1,5 +1,7 @@
 # SatSentinel Node 🛰️
 
+[![CI](https://github.com/danielsmendonca/satsentinel-node/actions/workflows/ci.yml/badge.svg)](https://github.com/danielsmendonca/satsentinel-node/actions)
+
 Agente de borda para homelab (Raspberry Pi, N100, NAS): processa células Sentinel-2 via HTTP Range, vota no consenso e serve a **Central de comando** local. Tudo em Node.js puro, sem dependência nativa.
 
 > Repo público — **sem segredos aqui**: `config/operator.key` e `config/node.config.json` estão no `.gitignore` e nunca são commitados.
