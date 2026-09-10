@@ -214,18 +214,30 @@ async function runSample(alert, idx, biome, row, expectZero = false) {
   const mp = maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef,
     Number(process.env.MINPX ?? 50), Number(process.env.MINFILL ?? 0.25));
   let best = 0;
+  let bestBox = null;
   const boxes = [];
   for (const poly of mp?.coordinates ?? []) {
     const bb = bboxOf(poly);
     boxes.push(bb);
-    best = Math.max(best, iou(bb, refBox));
+    const v = iou(bb, refBox);
+    if (v > best) { best = v; bestBox = bb; }
   }
+  // Mesmo com IoU 0 ha deteccao (mismatch total): usa a 1a box p/ distancia.
+  if (!bestBox && boxes.length > 0) bestBox = boxes[0];
   if (process.env.DEBUG_BOX) {
     console.log(`  alertBox=${refBox.map((v) => v.toFixed(4)).join(',')}`);
     boxes.slice(0, 5).forEach((b, i) => console.log(`  det${i}=${b.map((v) => v.toFixed(4)).join(',')}`));
   }
   console.log(`  -> IoU=${best.toFixed(2)} ${best >= 0.5 ? 'TP' : 'FN'}`);
   row.iou = +best.toFixed(3);
+  // Distancia centroide deteccao (melhor box) -> centroide alerta (km): metrica
+  // de "localizou?" tolerante a poligono DETER grosseiro (R8). Haversine.
+  if (bestBox) {
+    const [blo, bla] = [(bestBox[0] + bestBox[2]) / 2, (bestBox[1] + bestBox[3]) / 2];
+    const R = 6371, dLa = (bla - lat) * Math.PI / 180, dLo = (blo - lon) * Math.PI / 180;
+    const h = Math.sin(dLa / 2) ** 2 + Math.cos(lat * Math.PI / 180) * Math.cos(bla * Math.PI / 180) * Math.sin(dLo / 2) ** 2;
+    row.det_dist_km = +(2 * R * Math.asin(Math.sqrt(h))).toFixed(2);
+  }
   return best >= 0.5 ? 'tp' : 'fn';
 }
 
@@ -242,7 +254,15 @@ const LAYERS = [
   { biome: 'cerrado', type: 'deter-cerrado-nb:deter_cerrado', bbox: '-46,-12,-45,-11', max: 60 },
 ];
 const all = [];
-for (const L of LAYERS) {
+// Snapshot WFS (R7-nota): WFS ao vivo deriva entre rounds. CANDIDATES_IN carrega
+// lista fixa (gerada com LIST_ONLY + SNAPSHOT_OUT); sem ele, busca ao vivo.
+if (process.env.CANDIDATES_IN) {
+  const { readFileSync: _rf, existsSync: _ex } = await import('node:fs');
+  if (!_ex(process.env.CANDIDATES_IN)) throw new Error(`CANDIDATES_IN nao encontrado: ${process.env.CANDIDATES_IN}`);
+  for (const f of JSON.parse(_rf(process.env.CANDIDATES_IN, 'utf8'))) all.push(f);
+  console.log(`candidatos via snapshot: ${all.length} (${process.env.CANDIDATES_IN})`);
+} else {
+  for (const L of LAYERS) {
   const url = `https://terrabrasilis.dpi.inpe.br/geoserver/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=${L.type}&outputFormat=application%2Fjson&maxFeatures=${L.max}&bbox=${L.bbox}`;
   let feats = null;
   for (let attempt = 1; attempt <= 4 && !feats; attempt++) {
@@ -260,6 +280,7 @@ for (const L of LAYERS) {
     continue;
   }
   for (const f of feats) all.push({ ...f, _biome: L.biome });
+  }
 }
 // estratifica por bioma+mes: round-robin dos maiores por mes
 const groups = new Map();
@@ -299,6 +320,11 @@ while (cands.length < MAXN && added) {
   }
 }
 console.log(`candidatos: ${cands.length} (${[...groups.keys()].length} estratos bioma/mes) TH=${TH} MINPX=${MINPX}`);
+if (process.env.SNAPSHOT_OUT) {
+  const { writeFileSync: _wf } = await import('node:fs');
+  _wf(process.env.SNAPSHOT_OUT, JSON.stringify(cands));
+  console.log(`snapshot gravado: ${cands.length} candidatos -> ${process.env.SNAPSHOT_OUT}`);
+}
 if (process.env.LIST_ONLY) {
   for (const c of cands) {
     const p = c.properties;
@@ -360,6 +386,19 @@ const prec = tp + fp ? tp / (tp + fp) : 0;
 const f1 = prec + rec ? (2 * prec * rec) / (prec + rec) : 0;
 console.log(`\nTH=${TH} PX=${MINPX}: TP=${tp} FN=${fn} TN=${tn} FP=${fp} skips=${res.skip} -> ${OUT}`);
 console.log(`recall=${rec.toFixed(2)} precision=${prec.toFixed(2)} F1=${f1.toFixed(2)}`);
+// Distancia deteccao->alerta (R8): "localizou?" tolerante a poligono grosseiro.
+// LOC_DIST_KM default 5: fracao dos avaliados com deteccao a <=X km do alerta.
+{
+  const { readFileSync: _rf2 } = await import('node:fs');
+  let _rows = [];
+  try { _rows = _rf2(OUT, 'utf8').trim().split('\n').map(JSON.parse); } catch { /* OUT vazio */ }
+  const DX = Number(process.env.LOC_DIST_KM ?? 5);
+  const det = _rows.filter((r) => r.det_dist_km != null);
+  const loc = det.filter((r) => r.det_dist_km <= DX);
+  const ds = det.map((r) => r.det_dist_km).sort((a, b) => a - b);
+  const med = ds.length ? ds[Math.floor(ds.length / 2)] : null;
+  console.log(`LOCATED(dist<=${DX}km): ${loc.length}/${det.length} detecções localizadas; mediana=${med ?? '-'} km`);
+}
 if (process.env.PERSIST === '1') {
   // Métrica com filtro de persistência: detecção só vale se persistiu em 2 cenas.
   // tp/fp não-persistidos viram fn/tn; 'unknown' mantém outcome original (falta de dados ≠ transiente).
