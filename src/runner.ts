@@ -5,7 +5,7 @@
  * 3. Processa demo deterministico (pipeline puro; COG real via geotiff quando URL interna).
  * 4. POST /results/report assinado; heartbeat a cada 2min durante processamento longo.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,8 @@ import { hexToBytes, bytesToHex } from '@noble/hashes/utils';
 import { ed25519 } from '@noble/curves/ed25519';
 import { signPayload } from '@satsentinel/protocol';
 import { loadOrCreate } from './identity/operator.js';
-import { detectWindow, ndvi, MIN_VALID_FRAC, PERSIST_IOU_MIN, maskIoU } from './pipeline/ndvi.js';
+import { detectWindow, ndvi, medianOf, MIN_VALID_FRAC, PERSIST_IOU_MIN, maskIoU } from './pipeline/ndvi.js';
+import { renderNdviThumb, THUMB_CACHE_KEEP } from './viz/thumb.js';
 import { maskToMultiPolygon } from './pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from './fetcher/mgrs.js';
 import { forestMask } from './pipeline/scl.js';
@@ -72,6 +73,7 @@ export interface RunDetail {
   decision?: string;
   quorum?: string;
   persisted?: boolean;
+  thumbs?: boolean;
   error?: string;
 }
 
@@ -124,9 +126,11 @@ async function detectEpoch(
  * vota NULO honesto em vez de FP; o server recebe a evidencia em `persistence`.
  * Exportado p/ validacao live (validation/dual_live.mjs) — producao usa via runOnceDetailed.
  */
+export interface VoteThumbs { t0: Uint8Array; base: Uint8Array; }
+
 export async function processReal(
   lease: Lease, eventClass: 'DEFORESTATION' | 'WATER_BODY_CHANGE',
-): Promise<{ geometry: { type: 'MultiPolygon'; coordinates: number[][][][] } | null; score: number; validFrac: number; persistence?: PersistenceEvidence }> {
+): Promise<{ geometry: { type: 'MultiPolygon'; coordinates: number[][][][] } | null; score: number; validFrac: number; persistence?: PersistenceEvidence; thumbs?: VoteThumbs }> {
   const mgrs = lease.mgrs_tile && lease.mgrs_tile !== 'UNKNOWN'
     ? lease.mgrs_tile : parseMgrsTile(lease.observation_id, {});
   const { def: utmDef } = utmFromMgrs(mgrs);
@@ -178,6 +182,17 @@ export async function processReal(
   const det = detectWindow(red, nir, scl, baseNdvis, eventClass,
     forest ? { requireForest: true, forest } : {});
   if (det.validFracT0 < MIN_VALID_FRAC) throw new Error(`valid_frac=${det.validFracT0.toFixed(2)} abaixo de ${MIN_VALID_FRAC} (nuvem/haze)`);
+  // F1 visual: thumbs NDVI t0 (com contorno) + mediana das baselines.
+  // Best-effort puro: nunca derruba voto; salva quem chama (runOnceDetailed).
+  let thumbs: VoteThumbs | undefined;
+  try {
+    const cur = ndvi(red, nir);
+    const med = medianOf(baseNdvis, cur);
+    thumbs = {
+      t0: renderNdviThumb(cur, ref.width, ref.height, det.count > 0 ? det.mask : null).png,
+      base: renderNdviThumb(med, ref.width, ref.height, null).png,
+    };
+  } catch { /* sem thumbs, voto segue */ }
   // v1.4 DUAL_EPOCH: confirma na 2a cena antes de votar (R5).
   const epoch2 = lease.cog_urls.epoch2;
   if ((lease.task_kind ?? 'SINGLE') === 'DUAL_EPOCH' || epoch2) {
@@ -189,17 +204,17 @@ export async function processReal(
       const persisted = e2.count > 0 && piou >= PERSIST_IOU_MIN;
       const persistence: PersistenceEvidence = { epoch2_scene: epoch2.scene, persist_count: e2.count, persist_iou: +piou.toFixed(3), persisted };
       if (!persisted) {
-        return { geometry: null, score: 0, validFrac: det.validFracT0, persistence };
+        return { geometry: null, score: 0, validFrac: det.validFracT0, persistence, ...(thumbs ? { thumbs } : {}) };
       }
       const geometry = maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef, 50, 0.25);
-      return { geometry, score: geometry ? det.uncalibrated : 0, validFrac: det.validFracT0, persistence };
+      return { geometry, score: geometry ? det.uncalibrated : 0, validFrac: det.validFracT0, persistence, ...(thumbs ? { thumbs } : {}) };
     }
   }
   const geometry = det.count > 0
     ? maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef, 50, 0.25)
     : null;
   const score = geometry ? det.uncalibrated : 0; // sem feicao >=50px: sem deteccao (Zod exige score<0.1 p/ null)
-  return { geometry, score, validFrac: det.validFracT0 };
+  return { geometry, score, validFrac: det.validFracT0, ...(thumbs ? { thumbs } : {}) };
 }
 
 export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> {
@@ -227,7 +242,27 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
     }).catch(() => undefined);
   }, 120_000);
   try {
-    const { geometry, score, validFrac, persistence } = await processReal(lease, eventClass);
+    const { geometry, score, validFrac, persistence, thumbs } = await processReal(lease, eventClass);
+    // F1 visual: thumbs em cache local (nunca no report: raster nao cruza o protocolo).
+    let thumbSaved = false;
+    if (thumbs) {
+      try {
+        const dir = join(configDir, 'thumbs');
+        mkdirSync(dir, { recursive: true });
+        const prefix = `${lease.h3_index}_${lease.task_id}`;
+        writeFileSync(join(dir, `${prefix}_t0.png`), thumbs.t0);
+        writeFileSync(join(dir, `${prefix}_base.png`), thumbs.base);
+        thumbSaved = true;
+        // LRU simples: passa de 2x o teto, apaga os mais antigos.
+        const files = readdirSync(dir).map((f) => {
+          try { return { f, m: statSync(join(dir, f)).mtimeMs }; } catch { return null; }
+        }).filter((x): x is { f: string; m: number } => !!x).sort((a, b) => a.m - b.m);
+        while (files.length > THUMB_CACHE_KEEP * 2) {
+          const old = files.shift();
+          try { unlinkSync(join(dir, old!.f)); } catch { /* ja foi */ }
+        }
+      } catch { /* cache visual nao derruba voto */ }
+    }
     // renova o lease antes de reportar (processamento real pode levar minutos)
     await fetch(`${base}/v1/tasks/${lease.assignment_id}/heartbeat`, {
       method: 'PUT', headers: { 'content-type': 'application/json', ...auth }, body: '{}',
@@ -243,7 +278,7 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
     report.signature_hex = signPayload(report, hexToBytes(key.private_key_hex));
     const accepted = await api(base, '/v1/results/report', { method: 'POST', headers: auth, body: JSON.stringify(report) });
     const d = (accepted!.data ?? {}) as { event_id?: string | null; decision?: string; quorum_state?: string };
-    return { status: 'reported', taskId: lease.task_id, h3: lease.h3_index, score, eventId: d.event_id ?? null, decision: d.decision, quorum: d.quorum_state, ...(persistence ? { persisted: persistence.persisted } : {}) };
+    return { status: 'reported', taskId: lease.task_id, h3: lease.h3_index, score, eventId: d.event_id ?? null, decision: d.decision, quorum: d.quorum_state, ...(persistence ? { persisted: persistence.persisted } : {}), ...(thumbSaved ? { thumbs: true } : {}) };
   } catch (e) {
     // Falha honesta marca FAILED (libera p/ outros, exclui este no). Excecao:
     // 5xx do server (transitorio) -> nao marca; o lease expira e o voto refaz.

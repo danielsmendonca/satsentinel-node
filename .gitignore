@@ -3,6 +3,7 @@ dist/
 *.log
 config/operator.key
 config/node.config.json
+config/thumbs/
 # diretórios de identidade locais (cada um tem seu operator.key privado)
 live-*/
 cfg-*/

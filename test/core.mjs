@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ndvi, detectWindow, MIN_VALID_FRAC, PERSIST_IOU_MIN, erodeValidMask, maskIoU } from '../dist/src/pipeline/ndvi.js';
+import { ndvi, detectWindow, MIN_VALID_FRAC, PERSIST_IOU_MIN, erodeValidMask, maskIoU, medianOf as medianBaseline } from '../dist/src/pipeline/ndvi.js';
+import { ndviThumbRgb, downsample, downsampleMask, encodePng, renderNdviThumb, THUMB_MAX_DIM } from '../dist/src/viz/thumb.js';
 import { components, pixelBboxToRing, maskToMultiPolygon, traceContour, simplifyRing, snapRing } from '../dist/src/pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
 import { computeWindow, resampleNearest, extentToUtm } from '../dist/src/fetcher/windows.js';
@@ -20,8 +21,7 @@ test('piso ceu-limpo trava em 0.6 (tuning DETER R2: mata FPs de borda sem perder
   assert.equal(MIN_VALID_FRAC, 0.6);
 });
 
-test('v1.4 DUAL_EPOCH: maskIoU mede overlap; limiar 0.05 (R5: mata 6/7 FPs, mantem 2/2 TPs)', () => {
-  assert.equal(PERSIST_IOU_MIN, 0.05);
+test('v1.4 DUAL_EPOCH: maskIoU mede overlap; limiar 0.05 (R5: mata 6/7 FPs, mantem 2/2 TPs)', () => {  assert.equal(PERSIST_IOU_MIN, 0.05);
   const a = new Uint8Array(100); const b = new Uint8Array(100);
   for (let i = 0; i < 50; i++) a[i] = 1;
   for (let i = 25; i < 75; i++) b[i] = 1;
@@ -333,4 +333,46 @@ test('snapRing: tira quase-duplicados e mantém fecho (anti-GEOS-XX000)', () => 
   for (let i = 1; i < s.length; i++) {
     assert.ok(Math.hypot(s[i][0] - s[i - 1][0], s[i][1] - s[i - 1][1]) > 0);
   }
+});
+
+test('F1 visual: colormap NDVI vai de vermelho (corte) a verde (mata)', () => {
+  const [r0, g0] = ndviThumbRgb(-0.6);
+  assert.ok(r0 > 150 && g0 < 120); // avermelhado
+  const [r1, g1] = ndviThumbRgb(0.8);
+  assert.ok(g1 > r1 && g1 > 100); // esverdeado
+  assert.equal(THUMB_MAX_DIM, 256);
+});
+
+test('F1 visual: medianOf replica a regra do detectWindow (3, 2 com duplicacao)', () => {
+  const a = new Float32Array([1, 5]), b = new Float32Array([2, 4]), c = new Float32Array([3, 6]);
+  assert.deepEqual([...medianBaseline([a, b, c], a)], [2, 5]);
+  assert.deepEqual([...medianBaseline([a, b], a)], [2, 4]); // med(a,b,b)
+  assert.ok(medianBaseline([], a) === a); // sem referencia: fallback
+});
+
+test('F1 visual: downsample reduz e mascara preserva mancha (OR)', () => {
+  const f = new Float32Array(8 * 8).fill(0.5);
+  const d = downsample(f, 8, 8, 4);
+  assert.equal(d.w, 4); assert.equal(d.h, 4); // s=2
+  assert.ok(d.data.every((v) => Math.abs(v - 0.5) < 1e-9));
+  const m = new Uint8Array(8 * 8); m[63] = 1;
+  const dm = downsampleMask(m, 8, 8, 4);
+  assert.equal(dm.w, 4); assert.equal(dm.data[15], 1); // bloco (3,3)
+  assert.equal(dm.data[0], 0);
+});
+
+test('F1 visual: PNG valido (assinatura, IHDR com dimensoes, deterministico)', () => {
+  const field = new Float32Array(16 * 12).fill(0.6);
+  const mask = new Uint8Array(16 * 12); mask[0] = 1;
+  const t1 = renderNdviThumb(field, 16, 12, mask, 8);
+  assert.equal(t1.w, 8); assert.equal(t1.h, 6); // s=2
+  const p = t1.png;
+  assert.deepEqual([...p.slice(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]); // assinatura
+  const dv = new DataView(p.buffer, p.byteOffset);
+  assert.equal(dv.getUint32(16), 8); // IHDR largura
+  assert.equal(dv.getUint32(20), 6); // IHDR altura
+  assert.equal(p[25], 2); // truecolor
+  const t2 = renderNdviThumb(field, 16, 12, mask, 8);
+  assert.deepEqual([...t1.png], [...t2.png]); // deterministico (base p/ hash F5)
+  assert.ok(p.length > 50 && p.length < 20000);
 });

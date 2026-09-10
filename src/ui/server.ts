@@ -1,6 +1,7 @@
 /** Central de comando local :3000 — HUD, adotar, quadrantes, tarefas realtime + auto-run. */
 import Fastify from 'fastify';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { loadOrCreate, exportPairing, importPairing, configPath } from '../identity/operator.js';
 import { runOnceDetailed, getSession, type RunDetail } from '../runner.js';
 
@@ -245,14 +246,49 @@ export async function buildLocalUi(configDir = 'config') {
     return reply.send(await r.json());
   });
   // Fronteiras de adotados (p/ desenhar hexágonos verdes fora da grade visível).
-  app.get('/api/cells', async (req, reply) => {
-    const { cfg } = loadOrCreate(configDir);
+  app.get('/api/cells', async (req, reply) => {    const { cfg } = loadOrCreate(configDir);
     const q = req.query as Record<string, string>;
     if (!q.h) return reply.code(400).send({ error: 'h=idx1,idx2... obrigatorio' });
     const base = cfg.server_url.replace(/\/$/, '');
     const r = await fetch(`${base}/v1/h3/cells?h=${encodeURIComponent(q.h)}`);
     if (!r.ok) return reply.code(502).send({ error: `server h3cells: ${r.status}` });
     return reply.send(await r.json());
+  });
+  // F1 visual: thumbs NDVI geradas no voto (cache local, nunca no protocolo).
+  // GET /api/thumbs?h=<h3> -> [{task, t0, base, mtime}] (ate 6 tasks recentes)
+  // GET /api/thumb?h=<h3>&task=<uuid>&kind=t0|base -> image/png
+  const thumbFile = (dir: string, h: string, task: string, kind: string): string | null => {
+    if (!/^[0-9a-f]{15}$/.test(h) || !/^[0-9a-f-]{8,36}$/.test(task) || (kind !== 't0' && kind !== 'base')) return null;
+    if (task.includes('..') || h.includes('..')) return null;
+    return join(dir, 'thumbs', `${h}_${task}_${kind}.png`);
+  };
+  app.get('/api/thumbs', async (req, reply) => {
+    const q = req.query as Record<string, string>;
+    if (!q.h || !/^[0-9a-f]{15}$/.test(q.h)) return reply.code(400).send({ error: 'h invalido' });
+    let files: string[] = [];
+    try { files = readdirSync(join(configDir, 'thumbs')).filter((f) => f.startsWith(`${q.h}_`) && f.endsWith('.png')); } catch { return { data: [] }; }
+    const byTask = new Map<string, { task: string; t0?: string; base?: string; mtime: number }>();
+    for (const f of files) {
+      const m = f.match(/^([0-9a-f]{15})_([0-9a-f-]{8,36})_(t0|base)\.png$/);
+      if (!m) continue;
+      const [, , task, kind] = m;
+      let e = byTask.get(task);
+      if (!e) { e = { task, mtime: 0 }; byTask.set(task, e); }
+      try { e.mtime = Math.max(e.mtime, statSync(join(configDir, 'thumbs', f)).mtimeMs); } catch { /* some */ }
+      const url = `/api/thumb?h=${q.h}&task=${task}&kind=${kind}`;
+      if (kind === 't0') e.t0 = url; else e.base = url;
+    }
+    const list = [...byTask.values()].sort((a, b) => b.mtime - a.mtime).slice(0, 6);
+    return { data: list };
+  });
+  app.get('/api/thumb', async (req, reply) => {
+    const q = req.query as Record<string, string>;
+    const fp = thumbFile(configDir, q.h ?? '', q.task ?? '', q.kind ?? '');
+    if (!fp) return reply.code(400).send({ error: 'parametros invalidos' });
+    let buf: Buffer;
+    try { buf = readFileSync(fp); } catch { return reply.code(404).send({ error: 'thumb nao encontrada' }); }
+    if (buf.length < 20 || buf[0] !== 137 || buf[1] !== 80) return reply.code(404).send({ error: 'thumb invalida' });
+    return reply.type('image/png').header('cache-control', 'public, max-age=86400').send(buf);
   });
   // Logs: anel local (node) + anel do server (requisicoes).
   app.get('/api/logs', async (req, reply) => {
@@ -889,6 +925,22 @@ async function showHist(h){
         ' · conf '+Number(e.calibrated_confidence||0).toFixed(2)+' · IoU '+Number(e.spatial_agreement_iou||0).toFixed(2)+
         ' · '+hhmm(e.created_at)+'</span></div>';
     }
+    // F1 visual: pares antes x depois votados por este no (thumbs NDVI locais).
+    try{
+      const tj=await (await fetch('/api/thumbs?h='+encodeURIComponent(h))).json();
+      const pairs=(tj.data||[]).filter(x=>x.t0&&x.base);
+      if(pairs.length){
+        html+='<div class="row"><span class="grow"><b>🛰 ANTES × DEPOIS</b><br><small style="color:var(--dim)">verde=mata · vermelho=corte · passe o mouse para ver o antes</small></span></div>';
+        for(const p of pairs.slice(0,3)){
+          html+='<div class="row"><span class="grow"><small style="color:var(--dim)">voto '+String(p.task).slice(0,8)+'</small>'+
+            '<div style="position:relative;line-height:0;border-radius:8px;overflow:hidden;border:1px solid #1e293b">'+
+            '<img loading="lazy" src="'+p.base+'" style="width:100%;display:block" alt="antes">'+
+            '<img loading="lazy" src="'+p.t0+'" style="position:absolute;inset:0;width:100%;height:100%;transition:opacity .25s" onmouseover="this.style.opacity=0" onmouseout="this.style.opacity=1" alt="agora">'+
+            '<span style="position:absolute;top:4px;left:4px;font-size:10px;background:rgba(2,6,23,.75);color:#00f2fe;padding:1px 6px;border-radius:99px">AGORA</span>'+
+            '</div></span></div>';
+        }
+      }
+    }catch(e2){/* sem thumbs: timeline segue */}
     el.innerHTML=html;
     $('hist-back').onclick=()=>{el.innerHTML='';};
     icons();

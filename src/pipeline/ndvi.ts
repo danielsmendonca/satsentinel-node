@@ -124,3 +124,14 @@ export function detectWindow(
   const uncalibrated = count === 0 ? 0 : Math.min(1, Math.max(0, Math.abs(meanDndvi) * 2.0)) * (0.7 + 0.3 * vf);
   return { mask, validFracT0: vf, meanDndvi, uncalibrated, count };
 }
+
+/**
+ * Mediana temporal das baselines (mesma regra do detectWindow): 3 entradas,
+ * 2 com duplicacao, <2 = sem referencia (retorna o atual). Exportada p/
+ * thumbnails (F1 visual) reutilizarem exatamente a referencia do voto.
+ */
+export function medianOf(baselineNdvis: Float32Array[], fallback: Float32Array): Float32Array {
+  if (baselineNdvis.length >= 3) return median3(baselineNdvis[0], baselineNdvis[1], baselineNdvis[2]);
+  if (baselineNdvis.length === 2) return median3(baselineNdvis[0], baselineNdvis[1], baselineNdvis[1]);
+  return fallback;
+}
