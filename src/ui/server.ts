@@ -108,13 +108,10 @@ async function doRun(configDir: string): Promise<void> {
       return;
     }
     const { base, auth } = await getSession(configDir);
-    // lotes rotativos de 20: com muitos adotados, cada rodada cobre a proxima fatia
-    const cursor = Number(full.ensure_cursor ?? 0);
-    const batch = adopted.slice(cursor, cursor + 20);
-    const wrapped = batch.length === 0 && adopted.length > 0;
-    const lote = wrapped ? adopted.slice(0, 20) : batch;
-    writeCfg(configDir, { ensure_cursor: (cursor + 20) % Math.max(adopted.length, 1) });
-    runState.current = `lote ${Math.floor(cursor / 20) + 1} (${lote.length}/${adopted.length} quadrantes, x4 paralelo)…`;
+    // Fila completa: garante task para TODAS as adotadas (x4 paralelo).
+    // Redundante é barato (ON CONFLICT DO NOTHING) e o ociosidade do homelab absorve.
+    const lote = adopted.slice(0, 500);
+    runState.current = `garantindo tasks (${lote.length} quadrantes, x4 paralelo)…`;
     await mapLimit(lote, 4, async (h) => {
       runState.current = `garantindo tasks (${runState.items.length}/${lote.length})…`;
       const item: RunItem = { h3: h, phase: 'ensure' };
@@ -159,13 +156,12 @@ async function doRun(configDir: string): Promise<void> {
     const novas = runState.items.filter((x) => x.created).length;
     const falhas = runState.items.filter((x) => x.result === 'failed').length;
     const ev = votes.find((x) => x.eventId);
-    const loteInfo = adopted.length > 20 ? ` · lote ${Math.floor(cursor / 20) + 1}/${Math.ceil(adopted.length / 20)}` : '';
     const failInfo = falhas > 0 ? ` · ${falhas} falha(s) honestas` : '';
     runState.summary = votes.length === 0
-      ? `💤 ${adopted.length} quadrante(s)${loteInfo}, ${novas} task(s) nova(s), nenhum voto` +
+      ? `💤 ${adopted.length} quadrante(s), ${novas} task(s) nova(s), nenhum voto` +
         (falhas > 0 ? failInfo : ' (fila esvaziada p/ seu operador)')
-      : `✅ ${votes.length} voto(s) · ${novas} task(s) nova(s)${loteInfo}${failInfo}` +
-        (ev?.eventId ? ` · ${ev.decision} ${ev.eventId.slice(0, 8)}` : ' · aguardando quorum (faltam 2 operadores)');
+      : `✅ ${votes.length} voto(s) · ${novas} task(s) nova(s)${failInfo}` +
+        (ev?.eventId ? ` · ${ev.decision} ${ev.eventId.slice(0, 8)}` : ' · aguardando quorum (falta 1 operador)');
   } catch (e) {
     runState.summary = `❌ run falhou: ${String(e).slice(0, 200)}`;
     logEvent('err', `run falhou: ${String(e).slice(0, 160)}`);
@@ -831,13 +827,15 @@ async function refreshRun(){
   let html='<div class="row"><span class="grow">Estado</span>'+
     (s.running?'<span class="pill run"><span class="spin">◌</span> RODANDO</span>':'<span class="pill ok">PARADO</span>')+'</div>';
   if(s.running&&s.current)html+='<div class="row"><span class="grow">⏳ '+s.current+'</span></div>';
-  for(const it of s.items){
+  const shown=s.items.slice(-150);
+  if(s.items.length>shown.length)html+='<div class="hint">mostrando '+shown.length+' de '+s.items.length+' itens…</div>';
+  for(const it of shown){
     const cls=it.phase==='erro'?'err':(it.result==='reported'||it.created?'ok':'run');
     const nm=it.h3?('▦ '+short12(it.h3)):('task '+String(it.taskId||'').slice(0,8));
     let d=it.phase;
     if(it.observation)d+=' · '+String(it.observation).slice(0,20);
     if(it.score!=null)d+=' · score '+Number(it.score).toFixed(2);
-    if(it.result==='reported')d+=' → '+(it.decision||'?')+(it.eventId?' · ev '+String(it.eventId).slice(0,8):' · 1/3 votos');
+    if(it.result==='reported')d+=' → '+(it.decision||'?')+(it.eventId?' · ev '+String(it.eventId).slice(0,8):' · 1/2 votos');
     if(it.error)d+=' · '+it.error;
     if(it.ms!=null)d+=' · '+(it.ms/1000).toFixed(1)+'s';
     html+='<div class="row"><span class="grow">'+nm+' — '+d+'</span><span class="pill '+cls+'">'+it.phase+'</span></div>';
