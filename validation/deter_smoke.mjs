@@ -75,21 +75,31 @@ async function runSample(alert, idx, biome, row, expectZero = false) {
   const t0dt = t0.properties.datetime;
   console.log(`  t0: ${t0.id} ${t0dt.slice(0, 10)}`);
   row.scene = t0.id;
-  const since = new Date(new Date(t0dt).getTime() - 60 * 864e5).toISOString();
+  // R7 (OLD_REF=1): referencia PRE-disturbio — 3 baselines MAIS ANTIGAS do
+  // mesmo tile em ate 180d (combate o lag do DETER: mediana recente ja mostra
+  // a area derrubada e o dNDVI zera). Default = mediana recente (producao atual).
+  const OLD_REF = process.env.OLD_REF === '1';
+  const winDays = OLD_REF ? 180 : 60;
+  if (OLD_REF) row.oldref = 1;
+  const since = new Date(new Date(t0dt).getTime() - winDays * 864e5).toISOString();
   const prev = await stacSearch({
     collections: ['sentinel-2-l2a'],
     intersects: { type: 'Point', coordinates: [lon, lat] },
     datetime: `${since}/${t0dt}`,
     query: { 'eo:cloud_cover': { lt: 30 } },
-    sortby: [{ field: 'properties.datetime', direction: 'desc' }],
-    limit: 6,
+    sortby: [{ field: 'properties.datetime', direction: OLD_REF ? 'asc' : 'desc' }],
+    limit: OLD_REF ? 30 : 6,
   });
-  const bases = prev
+  const picked = prev
     .filter((p) => p.id !== t0.id)
     // Producao exige MESMO tile (GDD Sec 7); cross-tile contamina a mediana com
     // nodata (debug blinds: mediana 0.0 -> dNDVI +0.5 ficticio). Opt-out: SAME_TILE=0.
-    .filter((p) => process.env.SAME_TILE === '0' || (p.id.match(/_(\d{2}[A-Z]{3})_/)?.[1] ?? '') === (t0.id.match(/_(\d{2}[A-Z]{3})_/)?.[1] ?? ''))
-    .slice(0, 3);
+    .filter((p) => process.env.SAME_TILE === '0' || (p.id.match(/_(\d{2}[A-Z]{3})_/)?.[1] ?? '') === (t0.id.match(/_(\d{2}[A-Z]{3})_/)?.[1] ?? ''));
+  // asc do STAC nem sempre volta ordenado apos filtros: garante a ponta certa.
+  picked.sort((a, b) => OLD_REF
+    ? (a.properties.datetime < b.properties.datetime ? -1 : 1)
+    : (a.properties.datetime < b.properties.datetime ? 1 : -1));
+  const bases = picked.slice(0, 3);
   if (bases.length < 2) { console.log('  SKIP: sem 2 baselines'); return 'skip'; }
   console.log(`  bases: ${bases.map((b) => b.id.slice(0, 21)).join(', ')}`);
   const urls = (f) => ({ B04: pick(f.assets, 'red', 'B04', 'b04'), B08: pick(f.assets, 'nir', 'nir08', 'B08', 'b08'), SCL: pick(f.assets, 'scl', 'SCL', 'scl') });
