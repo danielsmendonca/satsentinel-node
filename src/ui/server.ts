@@ -674,8 +674,10 @@ async function loadEvents(){
     if(evLayer)map.removeLayer(evLayer);
     evLayer=L.layerGroup();
     for(const e of (j.data?.events||[])){
-      try{L.geoJSON(e.geometry,{style:{color:'#ff5470',weight:2,fillColor:'#ff5470',fillOpacity:0.3}})
-        .bindPopup('<b>'+e.lifecycle_state+'</b> '+(e.event_class||'')+'<br>conf '+(Number(e.calibrated_confidence||0)).toFixed(2)+'<br><code>'+String(e.id).slice(0,8)+'</code>')
+      try{const un=e.lifecycle_state==='UNCONFIRMED';
+        const col=un?'#94a3b8':'#ff5470';
+        L.geoJSON(e.geometry,{style:{color:col,weight:2,dashArray:un?'5 4':null,fillColor:col,fillOpacity:un?0.12:0.3}})
+        .bindPopup((un?'<b>⚠ NÃO CONFIRMADO</b> (1 voto)<br>':'<b>'+e.lifecycle_state+'</b> ')+(e.event_class||'')+'<br>conf '+(Number(e.calibrated_confidence||0)).toFixed(2)+'<br><code>'+String(e.id).slice(0,8)+'</code>')
         .addTo(evLayer);}catch(_){}
     }
     evLayer.addTo(map);
