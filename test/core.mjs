@@ -1,13 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ndvi, detectWindow } from '../dist/src/pipeline/ndvi.js';
-import { components, pixelBboxToRing, maskToMultiPolygon } from '../dist/src/pipeline/vectorize.js';
+import { components, pixelBboxToRing, maskToMultiPolygon, traceContour } from '../dist/src/pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
 import { computeWindow, resampleNearest, extentToUtm } from '../dist/src/fetcher/windows.js';
 import { isValidScl } from '../dist/src/pipeline/scl.js';
 import { ChunkCache, coalescedGet } from '../dist/src/fetcher/cog.js';
 import { fromMnemonic, importPairing } from '../dist/src/identity/operator.js';
 import { mapLimit } from '../dist/src/ui/server.js';
+import { computeContainerDigest } from '../dist/src/security/digest.js';
+import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { generateMnemonic } from 'bip39';
 
 test('ndvi queda detecta anomalia; sem queda nao detecta', () => {
@@ -134,6 +138,41 @@ test('vetorizacao: 2 manchas 8x8, diagonal nao conecta, anel fecha em lon/lat', 
   assert.equal(maskToMultiPolygon(new Uint8Array(W * H), W, H, 500000, 8840000, 10, utm21s, 50), null);
 });
 
+const shoelace = (ring) => {
+  let a = 0;
+  for (let i = 0; i < ring.length - 1; i++) a += ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
+  return Math.abs(a) / 2;
+};
+
+test('traceContour: area exata do quadrado 8x8 e fecha o anel', () => {
+  const W = 20, H = 20;
+  const mask = new Uint8Array(W * H);
+  for (let r = 4; r < 12; r++) for (let c = 4; c < 12; c++) mask[r * W + c] = 1;
+  const ring = traceContour(mask, W, H, 4, 4, 11, 11);
+  assert.deepEqual(ring[0], ring[ring.length - 1]);
+  assert.deepEqual(ring[0], [4, 4]);
+  assert.equal(shoelace(ring), 64); // area exata em px, sem inset
+});
+
+test('traceContour: forma em L fecha com area exata', () => {
+  const W = 12, H = 12;
+  const mask = new Uint8Array(W * H);
+  for (let r = 2; r < 8; r++) for (let c = 2; c < 4; c++) mask[r * W + c] = 1; // haste 6x2=12
+  for (let r = 6; r < 8; r++) for (let c = 4; c < 8; c++) mask[r * W + c] = 1; // pe 2x4=8 (adjacente, conexo)
+  const ring = traceContour(mask, W, H, 2, 2, 7, 7);
+  assert.deepEqual(ring[0], ring[ring.length - 1]);
+  assert.equal(shoelace(ring), 20); // 12+8, uniao exata
+});
+
+test('traceContour: pixel isolado vira quadrado unitario', () => {
+  const W = 5, H = 5;
+  const mask = new Uint8Array(W * H);
+  mask[2 * W + 2] = 1;
+  const ring = traceContour(mask, W, H, 2, 2, 2, 2);
+  assert.equal(ring.length, 5);
+  assert.equal(shoelace(ring), 1);
+});
+
 test('mapLimit respeita concorrencia e preserva indices', async () => {
   let live = 0, peak = 0;
   const out = await mapLimit([0, 1, 2, 3, 4, 5, 6, 7], 3, async (x) => {
@@ -144,4 +183,17 @@ test('mapLimit respeita concorrencia e preserva indices', async () => {
   });
   assert.deepEqual(out, [0, 2, 4, 6, 8, 10, 12, 14]);
   assert.ok(peak <= 3 && peak > 1);
+});
+
+test('digest: deterministico, formato sha256:, muda com o conteudo', () => {
+  const d = mkdtempSync(join(tmpdir(), 'dig-'));
+  mkdirSync(join(d, 'sub'));
+  writeFileSync(join(d, 'b.js'), 'b');
+  writeFileSync(join(d, 'sub', 'a.js'), 'a');
+  const h1 = computeContainerDigest(d, '1.3.0');
+  const h2 = computeContainerDigest(d, '1.3.0');
+  assert.equal(h1, h2);
+  assert.ok(/^sha256:[0-9a-f]{64}$/.test(h1));
+  writeFileSync(join(d, 'sub', 'a.js'), 'alterado');
+  assert.notEqual(computeContainerDigest(d, '1.3.0'), h1);
 });

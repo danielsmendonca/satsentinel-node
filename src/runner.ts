@@ -7,6 +7,8 @@
  */
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { hexToBytes, bytesToHex } from '@noble/hashes/utils';
 import { ed25519 } from '@noble/curves/ed25519';
 import { signPayload } from '@satsentinel/protocol';
@@ -15,10 +17,18 @@ import { detectWindow, ndvi } from './pipeline/ndvi.js';
 import { maskToMultiPolygon } from './pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from './fetcher/mgrs.js';
 import { readBandWindow, resampleNearest } from './fetcher/windows.js';
+import { computeContainerDigest } from './security/digest.js';
 import { cellToBoundary } from 'h3-js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const bundleHash = createHash('sha256').update(readFileSync(new URL(import.meta.url))).digest('hex');
+// Digest real do bundle: o server só aceita leases/reports deste build (ALLOWED_DIGESTS).
+const hereDir = dirname(fileURLToPath(import.meta.url)); // dist/src
+let containerDigest = 'sha256:' + '0'.repeat(64);
+try {
+  const pkg = JSON.parse(readFileSync(join(hereDir, '..', '..', 'package.json'), 'utf8')) as { version?: string };
+  containerDigest = computeContainerDigest(join(hereDir, '..'), pkg.version ?? '');
+} catch { /* sem dist: mantém zeros (dev) */ }
 
 async function api(base: string, path: string, init?: RequestInit) {
   const r = await fetch(`${base}${path}`, { ...init, headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) } });
@@ -134,7 +144,7 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
   // lease
   const leaseRes = await fetch(`${base}/v1/tasks/lease`, {
     method: 'POST', headers: { 'content-type': 'application/json', ...auth },
-    body: JSON.stringify({ node_id: cfg.node_id, operator_id: key.operator_id, hw_arch: 'amd64', algorithm_version: 'DETERMINISTIC_NDVI_v1.2.0', processing_profile: 'MVP_AMAZON_R6_HALO128', container_digest: 'sha256:' + '0'.repeat(64) }),
+    body: JSON.stringify({ node_id: cfg.node_id, operator_id: key.operator_id, hw_arch: 'amd64', algorithm_version: 'DETERMINISTIC_NDVI_v1.2.0', processing_profile: 'MVP_AMAZON_R6_HALO128', container_digest: containerDigest }),
   });
   if (leaseRes.status === 204) return { status: 'idle' };
   if (!leaseRes.ok) throw new Error(`lease ${leaseRes.status}`);
@@ -147,12 +157,16 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
   const t0 = Date.now();
   try {
     const { geometry, score, validFrac } = await processReal(lease, eventClass);
+    // renova o lease antes de reportar (processamento real pode levar minutos)
+    await fetch(`${base}/v1/tasks/${lease.assignment_id}/heartbeat`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', ...auth }, body: '{}',
+    }).catch(() => undefined);
     const execMs = Math.max(1000, Date.now() - t0);
     const report: Record<string, unknown> = {
       assignment_id: lease.assignment_id, task_id: lease.task_id, node_id: cfg.node_id, operator_id: key.operator_id,
       geometry, model_score: score, event_class: eventClass,
       radiometric_quality: { valid_frac: validFrac, cloud_frac: 1 - validFrac, baseline_scene: lease.baseline_scene, eps: 1e-6 },
-      execution_time_ms: execMs, container_digest: 'sha256:' + '0'.repeat(64), algorithm_sha256: bundleHash,
+      execution_time_ms: execMs, container_digest: containerDigest, algorithm_sha256: bundleHash,
     };
     report.signature_hex = signPayload(report, hexToBytes(key.private_key_hex));
     const accepted = await api(base, '/v1/results/report', { method: 'POST', headers: auth, body: JSON.stringify(report) });

@@ -7,6 +7,7 @@
     "start": "node dist/src/runner.js",
     "ui": "node dist/src/ui/server.js",
     "test": "node --test test/*.mjs",
+    "digest": "node ./scripts/digest.mjs",
     "pairing:show": "node dist/src/identity/operator.js --show"
   },
   "dependencies": {
