@@ -127,10 +127,16 @@ async function runSample(alert, idx, biome, row, expectZero = false) {
   }
   const TH = Number(process.env.TH ?? -0.15);
   const MINPX = Number(process.env.MINPX ?? 50);
+  const LOW_VALID = Number(process.env.LOW_VALID ?? 0.6);
   const det = detectWindow(red, nir, scl, baseNdvis, 'DEFORESTATION',
     { dndviThreshold: TH, minPx: MINPX, ...(process.env.FOREST_GATE ? { requireForest: true, forest: forestMask(baseScls) } : {}) });
   console.log(`  valid=${(det.validFracT0 * 100).toFixed(0)}% px_anomalos=${det.count} score=${det.uncalibrated.toFixed(2)}`);
   row.valid = +det.validFracT0.toFixed(3); row.count = det.count; row.score = +det.uncalibrated.toFixed(3);
+  if (det.validFracT0 < LOW_VALID) {
+    console.log(`  SKIP: valid ${(det.validFracT0 * 100).toFixed(0)}% < piso ${LOW_VALID} (producao: SKIPPED)`);
+    row.outcome = 'skip-lowvalid';
+    return 'skip';
+  }
   if (expectZero) {
     // controle negativo (mata estavel): qualquer deteccao = falso-positivo
     const o = det.count === 0 ? 'tn' : 'fp';

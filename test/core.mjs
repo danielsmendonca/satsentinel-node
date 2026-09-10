@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ndvi, detectWindow } from '../dist/src/pipeline/ndvi.js';
+import { ndvi, detectWindow, MIN_VALID_FRAC } from '../dist/src/pipeline/ndvi.js';
 import { components, pixelBboxToRing, maskToMultiPolygon, traceContour, simplifyRing, snapRing } from '../dist/src/pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
 import { computeWindow, resampleNearest, extentToUtm } from '../dist/src/fetcher/windows.js';
@@ -15,6 +15,10 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateMnemonic } from 'bip39';
+
+test('piso ceu-limpo trava em 0.6 (tuning DETER R2: mata FPs de borda sem perder TPs)', () => {
+  assert.equal(MIN_VALID_FRAC, 0.6);
+});
 
 test('ndvi queda detecta anomalia; sem queda nao detecta', () => {
   const n = 8 * 8; // >= MIN_COMPONENT_PX (50)
