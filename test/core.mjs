@@ -181,16 +181,19 @@ test('simplifyRing: quadrado intacto, colineares removidos, anel fecha', () => {
   const tiny = [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]];
   assert.ok(simplifyRing(tiny, 1.0).length <= 5);
 });
-
-test('mapLimit respeita concorrencia e preserva indices', async () => {  let live = 0, peak = 0;
-  const out = await mapLimit([0, 1, 2, 3, 4, 5, 6, 7], 3, async (x) => {
-    live++; peak = Math.max(peak, live);
-    await new Promise((r) => setTimeout(r, 10));
+test('mapLimit respeita concorrencia e preserva indices', async () => {
+  // deterministico: barreira libera a 1a task quando a 2a comeca (sem timing)
+  let live = 0, peak = 0, started = 0, release = () => {};
+  const gate = new Promise((r) => { release = r; });
+  const out = await mapLimit([0, 1, 2, 3], 2, async (x) => {
+    live++; peak = Math.max(peak, live); started++;
+    if (started === 2) release();
+    else await gate;
     live--;
     return x * 2;
   });
-  assert.deepEqual(out, [0, 2, 4, 6, 8, 10, 12, 14]);
-  assert.ok(peak <= 3 && peak > 1);
+  assert.deepEqual(out, [0, 2, 4, 6]);
+  assert.equal(peak, 2);
 });
 
 test('digest: deterministico, formato sha256:, muda com o conteudo', () => {  const d = mkdtempSync(join(tmpdir(), 'dig-'));
