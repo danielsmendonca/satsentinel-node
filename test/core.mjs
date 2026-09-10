@@ -9,6 +9,7 @@ import { forestMask } from '../dist/src/pipeline/scl.js';
 import { ChunkCache, coalescedGet } from '../dist/src/fetcher/cog.js';
 import { fromMnemonic, importPairing } from '../dist/src/identity/operator.js';
 import { mapLimit } from '../dist/src/ui/server.js';
+import { qaClear, stToCelsius, cellTemperature, landsatUtmDef, tempColor, medianOf, ndviColor } from '../dist/src/thermal/landsat.js';
 import { computeContainerDigest } from '../dist/src/security/digest.js';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -165,8 +166,7 @@ test('traceContour: forma em L fecha com area exata', () => {
   assert.equal(shoelace(ring), 20); // 12+8, uniao exata
 });
 
-test('traceContour: pixel isolado vira quadrado unitario', () => {
-  const W = 5, H = 5;
+test('traceContour: pixel isolado vira quadrado unitario', () => {  const W = 5, H = 5;
   const mask = new Uint8Array(W * H);
   mask[2 * W + 2] = 1;
   const ring = traceContour(mask, W, H, 2, 2, 2, 2);
@@ -183,8 +183,7 @@ test('simplifyRing: quadrado intacto, colineares removidos, anel fecha', () => {
   assert.ok(simplifyRing(tiny, 1.0).length <= 5);
 });
 
-test('mapLimit respeita concorrencia e preserva indices', async () => {
-  let live = 0, peak = 0;
+test('mapLimit respeita concorrencia e preserva indices', async () => {  let live = 0, peak = 0;
   const out = await mapLimit([0, 1, 2, 3, 4, 5, 6, 7], 3, async (x) => {
     live++; peak = Math.max(peak, live);
     await new Promise((r) => setTimeout(r, 10));
@@ -233,4 +232,47 @@ test('gate floresta: anomalia em ex-pasto nao vota; em ex-floresta vota', () => 
   const r2 = detectWindow(red, nirNow, sclNow, [base, base], 'DEFORESTATION',
     { requireForest: true, forest: forestMask([fore, fore]) });
   assert.ok(r2.count > 0);
+});
+
+test('fill-ratio: cruz esparsa cai, mancha macica passa', () => {
+  const W = 10, H = 10;
+  const cross = new Uint8Array(W * H);
+  for (let i = 0; i < 10; i++) { cross[5 * W + i] = 1; cross[i * W + 5] = 1; } // 19px, bbox 100, fill 0.19
+  assert.equal(components(cross, W, H, 5, 50, 0.25).length, 0);
+  assert.equal(components(cross, W, H, 5, 50, 0).length, 1);
+  const sq = new Uint8Array(W * H);
+  for (let r = 1; r < 7; r++) for (let c = 1; c < 7; c++) sq[r * W + c] = 1; // 6x6 fill 1.0
+  assert.equal(components(sq, W, H, 5, 50, 0.5).length, 1);
+});
+
+test('termal: QA mascara nuvem, Kelvin->C, mediana ignora sujo', () => {
+  assert.equal(qaClear(0), true);
+  assert.equal(qaClear(1 << 3), false); // cloud
+  assert.equal(qaClear(1 << 4), false); // shadow
+  assert.equal(qaClear(1 << 6), true); // bit clear sozinho nao suja
+  assert.equal(stToCelsius(0), null);
+  assert.ok(Math.abs(stToCelsius(30000) - 26.85) < 0.01);
+  assert.equal(stToCelsius(100000), null); // disparate
+  const t = cellTemperature([30000, 31000, 32000, 0], [0, 0, 8, 0]);
+  assert.equal(t.clear, 2);
+  assert.ok(Math.abs(t.medianC - 31.85) < 0.01);
+  assert.equal(t.clearFrac, 0.5);
+  assert.equal(cellTemperature([0], [0]).medianC, null);
+});
+
+test('termal: UTM por centroide + escala de cor nos extremos', () => {
+  assert.ok(landsatUtmDef(-54.8, -8).includes('+zone=21'));
+  assert.ok(landsatUtmDef(-54.8, -8).includes('+south'));
+  assert.ok(landsatUtmDef(-54.8, 8).includes('+zone=21'));
+  assert.ok(!landsatUtmDef(-54.8, 8).includes('south'));
+  assert.equal(tempColor(5), '#3b82f6');
+  assert.equal(tempColor(50), '#ef4444');
+});
+
+test('ndvi layer: mediana e cor', () => {
+  assert.equal(medianOf([]), null);
+  assert.equal(medianOf([0.7]), 0.7);
+  assert.equal(medianOf([0.2, 0.8]), 0.5);
+  assert.equal(ndviColor(0), '#78643c');
+  assert.equal(ndviColor(1), '#22c55e');
 });

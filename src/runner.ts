@@ -144,7 +144,7 @@ async function processReal(
     forest ? { requireForest: true, forest } : {});
   if (det.validFracT0 < 0.3) throw new Error(`valid_frac=${det.validFracT0.toFixed(2)} abaixo de 0.3 (nuvem)`);
   const geometry = det.count > 0
-    ? maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef)
+    ? maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef, 50, 0.25)
     : null;
   const score = geometry ? det.uncalibrated : 0; // sem feicao >=50px: sem deteccao (Zod exige score<0.1 p/ null)
   return { geometry, score, validFrac: det.validFracT0 };

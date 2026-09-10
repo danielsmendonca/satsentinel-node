@@ -129,7 +129,7 @@ async function runSample(alert, idx, biome, row) {
   row.valid = +det.validFracT0.toFixed(3); row.count = det.count; row.score = +det.uncalibrated.toFixed(3);
   if (det.count === 0) { console.log('  -> FN (nada detectado)'); row.iou = 0; return 'fn'; }
   const mp = maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef,
-    Number(process.env.MINPX ?? 50));
+    Number(process.env.MINPX ?? 50), Number(process.env.MINFILL ?? 0));
   let best = 0;
   const boxes = [];
   for (const poly of mp?.coordinates ?? []) {

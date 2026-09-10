@@ -7,10 +7,10 @@ import proj4 from 'proj4';
 export interface BBoxPoly { ring: number[][]; px: number; }
 
 export function components(
-  mask: Uint8Array, W: number, H: number, minPx = 50, maxPolys = 50,
-): Array<{ c0: number; r0: number; c1: number; r1: number; px: number }> {
+  mask: Uint8Array, W: number, H: number, minPx = 50, maxPolys = 50, minFill = 0,
+): Array<{ c0: number; r0: number; c1: number; r1: number; px: number; fill: number }> {
   const seen = new Uint8Array(W * H);
-  const out: Array<{ c0: number; r0: number; c1: number; r1: number; px: number }> = [];
+  const out: Array<{ c0: number; r0: number; c1: number; r1: number; px: number; fill: number }> = [];
   const stack: number[] = [];
   for (let i = 0; i < W * H; i++) {
     if (!mask[i] || seen[i]) continue;
@@ -30,7 +30,12 @@ export function components(
       if (r > 0 && mask[j - W] && !seen[j - W]) { seen[j - W] = 1; stack.push(j - W); }
       if (r < H - 1 && mask[j + W] && !seen[j + W]) { seen[j + W] = 1; stack.push(j + W); }
     }
-    if (px >= minPx) out.push({ c0, r0, c1, r1, px });
+    if (px >= minPx) {
+      // fill-ratio: px / area do bbox. Filamentos e salpicos tem fill baixo;
+      // clareiras reais sao macicas. minFill=0 desliga.
+      const fill = px / ((c1 - c0 + 1) * (r1 - r0 + 1));
+      if (fill >= minFill) out.push({ c0, r0, c1, r1, px, fill });
+    }
   }
   out.sort((a, b) => b.px - a.px);
   return out.slice(0, maxPolys);
@@ -55,9 +60,9 @@ export function pixelBboxToRing(
 
 export function maskToMultiPolygon(
   mask: Uint8Array, W: number, H: number,
-  originX: number, originY: number, res: number, utmDef: string, minPx = 50,
+  originX: number, originY: number, res: number, utmDef: string, minPx = 50, minFill = 0,
 ): { type: 'MultiPolygon'; coordinates: number[][][][] } | null {
-  const comps = components(mask, W, H, minPx);
+  const comps = components(mask, W, H, minPx, 50, minFill);
   if (comps.length === 0) return null;
   const toLonLat = (px: number, py: number): [number, number] => {
     const [lon, lat] = proj4(utmDef, 'EPSG:4326', [originX + px * res, originY - py * res]) as [number, number];

@@ -223,6 +223,16 @@ export async function buildLocalUi(configDir = 'config') {
     if (!r.ok) return reply.code(502).send({ error: `server h3: ${r.status}` });
     return reply.send(await r.json());
   });
+  // Mosaico escalar (proxy p/ choropleth do server; celular so fala com :3000).
+  app.get('/api/layer', async (req, reply) => {
+    const { cfg } = loadOrCreate(configDir);
+    const q = req.query as Record<string, string>;
+    if (!q.name || !q.bbox) return reply.code(400).send({ error: 'name+bbox obrigatorios' });
+    const base = cfg.server_url.replace(/\/$/, '');
+    const r = await fetch(`${base}/v1/layers/${encodeURIComponent(q.name)}?bbox=${encodeURIComponent(q.bbox)}`);
+    if (!r.ok) return reply.code(502).send({ error: `server layer: ${r.status}` });
+    return reply.send(await r.json());
+  });
   // Fronteiras de adotados (p/ desenhar hexágonos verdes fora da grade visível).
   app.get('/api/cells', async (req, reply) => {
     const { cfg } = loadOrCreate(configDir);
@@ -448,6 +458,12 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 <button id="ly-sat" title="Satélite" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-slate-700 text-slate-400 btn-glow"><i data-lucide="satellite" class="w-5 h-5"></i></button>
 <button id="ly-grid" title="Grade H3" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-cyan-400 text-cyan-300 btn-glow"><i data-lucide="grid-3x3" class="w-5 h-5"></i></button>
 <button id="ly-ev" title="Vetores de anomalia" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-rose-400 text-rose-300 btn-glow"><i data-lucide="flame" class="w-5 h-5"></i></button>
+<button id="ly-temp" title="Temperatura (Landsat)" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-slate-700 text-slate-400 btn-glow"><i data-lucide="thermometer" class="w-5 h-5"></i></button>
+<button id="ly-veg" title="Vigor NDVI (Sentinel-2)" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-slate-700 text-slate-400 btn-glow"><i data-lucide="leaf" class="w-5 h-5"></i></button>
+</div>
+<div id="temp-legend" style="display:none" class="absolute bottom-2 right-2 z-[1100] rounded-xl bg-slate-950/90 backdrop-blur border border-slate-800/80 px-2.5 py-2 text-[10px] text-slate-400">
+<div id="temp-legend-title" class="mb-1 font-semibold tracking-wider">LST °C</div>
+<div class="flex items-center gap-1"><span id="temp-legend-lo">10</span><div id="temp-legend-bar" class="w-24 h-2 rounded-full" style="background:linear-gradient(90deg,#3b82f6,#22c55e,#facc15,#f97316,#ef4444)"></div><span id="temp-legend-hi">45+</span></div>
 </div>
 <aside id="panel" class="absolute top-2 right-14 bottom-2 w-[min(380px,90vw)] z-[1100] overflow-y-auto rounded-xl bg-slate-950/90 backdrop-blur-md border border-slate-800/80 p-3" style="display:none">
 <section id="v-cells">
@@ -542,6 +558,70 @@ $('ly-grid').onclick=()=>{gridOn=!gridOn;flipBtn('ly-grid',gridOn);
   else if(view==='cells')loadGrid(true);};
 $('ly-ev').onclick=()=>{evOn=!evOn;flipBtn('ly-ev',evOn);
   if(evOn)loadEvents();else if(evLayer)map.removeLayer(evLayer);};
+// --- camadas vivas (mosaicos escalares do server) ---
+let liveLayer=null, liveName=null;
+function liveColor(layer,v){
+  if(layer==='NDVI'){
+    const x=Math.min(1,Math.max(0,v));
+    const m=[120+(34-120)*x,100+(197-100)*x,60+(94-60)*x].map(n=>Math.round(n).toString(16).padStart(2,'0'));
+    return '#'+m.join('');
+  }
+  const stops=[[10,[59,130,246]],[20,[34,197,94]],[28,[250,204,21]],[35,[249,115,22]],[45,[239,68,68]]];
+  if(v<=stops[0][0])return '#3b82f6';
+  for(let i=1;i<stops.length;i++){
+    if(v<=stops[i][0]){const t0=stops[i-1][0],c0=stops[i-1][1],t1=stops[i][0],c1=stops[i][1];
+      const k=(v-t0)/(t1-t0);const m=c0.map((c,j)=>Math.round(c+(c1[j]-c)*k));
+      return '#'+m.map(c=>c.toString(16).padStart(2,'0')).join('');}
+  }
+  return '#ef4444';
+}
+function liveLegend(){
+  const t=$('temp-legend-title'),lo=$('temp-legend-lo'),hi=$('temp-legend-hi'),bar=$('temp-legend-bar');
+  if(liveName==='NDVI'){t.textContent='NDVI';lo.textContent='0';hi.textContent='1';
+    bar.style.background='linear-gradient(90deg,#78643c,#22c55e)';}
+  else{t.textContent='LST °C';lo.textContent='10';hi.textContent='45+';
+    bar.style.background='linear-gradient(90deg,#3b82f6,#22c55e,#facc15,#f97316,#ef4444)';}
+}
+function livePopup(layer,c){
+  const v=Number(c.value);
+  return (layer==='NDVI'?'🌿 NDVI '+v.toFixed(2):'🌡 '+v.toFixed(1)+' °C')+'<br>'+c.h3_index+'<br>'+c.votes+' voto(s)';
+}
+async function loadLive(){
+  if(!liveName)return;
+  try{
+    const b=map.getBounds(),q=b.getWest()+','+b.getSouth()+','+b.getEast()+','+b.getNorth();
+    const j=await (await fetch('/api/layer?name='+liveName+'&bbox='+encodeURIComponent(q))).json();
+    if(liveLayer)map.removeLayer(liveLayer);
+    liveLayer=L.layerGroup();
+    for(const c of (j.data?.cells||[])){
+      let ll=boundsCache.get(c.h3_index);
+      if(!ll){
+        try{
+          const r=await fetch('/api/cells?h='+c.h3_index);const jj=await r.json();
+          const bnd=(jj.data?.cells||[])[0]?.boundary;
+          if(!bnd)continue;
+          ll=bnd.map(p=>[p[0],p[1]]);boundsCache.set(c.h3_index,ll);
+        }catch(e){continue;}
+      }
+      L.polygon(ll,{color:liveColor(liveName,c.value),weight:1,fillColor:liveColor(liveName,c.value),fillOpacity:0.55})
+        .bindPopup(livePopup(liveName,c))
+        .addTo(liveLayer);
+    }
+    liveLayer.addTo(map);
+    $('temp-legend').style.display='block';
+  }catch(e){msg('Falha na camada viva: '+e);}
+}
+function setLive(name,btn){
+  liveName=(liveName===name)?null:name;
+  for(const [id,nm] of [['ly-temp','LST_C'],['ly-veg','NDVI']])flipBtn(id,liveName===nm);
+  liveLegend();
+  $('temp-legend').style.display=liveName?'block':'none';
+  if(liveLayer)map.removeLayer(liveLayer);
+  if(liveName)loadLive();
+}
+$('ly-temp').onclick=()=>setLive('LST_C');
+$('ly-veg').onclick=()=>setLive('NDVI');
+map.on('moveend',()=>{if(liveName)loadLive();});
 // --- console recolhivel ---
 $('console-toggle').onclick=()=>{$('console').classList.toggle('closed');};
 // --- logs ---
@@ -693,7 +773,6 @@ function paintGrid(){
 }
 async function loadGrid(force){
   if(view!=='cells'&&view!=='map'&&!force)return;
-  if(!gridOn){for(const [h,o] of [...layers]){if(!o.mine){map.removeLayer(o.poly);layers.delete(h);}}return;}
   if(!gridOn){for(const [h,o] of [...layers]){if(!o.mine){map.removeLayer(o.poly);layers.delete(h);}}return;}
   if(map.getZoom()<8){$('msg2').textContent='Aproxime o mapa (zoom 8+) para ver os cinzas.';return;}
   const my=++seq;
