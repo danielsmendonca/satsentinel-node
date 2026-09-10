@@ -16,6 +16,7 @@ import { loadOrCreate } from './identity/operator.js';
 import { detectWindow, ndvi } from './pipeline/ndvi.js';
 import { maskToMultiPolygon } from './pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from './fetcher/mgrs.js';
+import { forestMask } from './pipeline/scl.js';
 import { readBandWindow, resampleNearest } from './fetcher/windows.js';
 import { computeContainerDigest } from './security/digest.js';
 import { cellToBoundary } from 'h3-js';
@@ -125,12 +126,22 @@ async function processReal(
   const baselines = lease.cog_urls.baselines;
   if (!baselines || baselines.length < 2) throw new Error('NO_BASELINE: menos de 2 baselines congeladas');
   const baseNdvis: Float32Array[] = [];
+  const baseScls: Uint8Array[] = [];
   for (const b of baselines.slice(0, 3)) {
     const br = (await readOnGrid(b.B04)).data;
     const bn = (await readOnGrid(b.B08)).data;
     baseNdvis.push(ndvi(br, bn));
+    if (eventClass === 'DEFORESTATION') {
+      const bs = await readBandWindow(b.SCL, extent, utmDef, haloM);
+      baseScls.push(resampleNearest(
+        { data: bs.data, width: bs.width, height: bs.height, res: bs.res, originX: bs.originX, originY: bs.originY },
+        ref.width, ref.height, ref.originX, ref.originY, ref.res,
+      ));
+    }
   }
-  const det = detectWindow(red, nir, scl, baseNdvis, eventClass);
+  const forest = eventClass === 'DEFORESTATION' ? forestMask(baseScls) : undefined;
+  const det = detectWindow(red, nir, scl, baseNdvis, eventClass,
+    forest ? { requireForest: true, forest } : {});
   if (det.validFracT0 < 0.3) throw new Error(`valid_frac=${det.validFracT0.toFixed(2)} abaixo de 0.3 (nuvem)`);
   const geometry = det.count > 0
     ? maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef)

@@ -9,6 +9,7 @@ import { ndvi, detectWindow } from '../dist/src/pipeline/ndvi.js';
 import { maskToMultiPolygon } from '../dist/src/pipeline/vectorize.js';
 import { readBandWindow, resampleNearest } from '../dist/src/fetcher/windows.js';
 import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
+import { forestMask } from '../dist/src/pipeline/scl.js';
 import { latLngToCell, cellToBoundary } from 'h3-js';
 import { appendFileSync } from 'node:fs';
 import { unlinkSync } from 'node:fs';
@@ -112,10 +113,18 @@ async function runSample(alert, idx, biome, row) {
   const sclRaw = await readBandWindow(t0u.SCL, extent, utmDef, haloM);
   const scl = resampleNearest({ data: sclRaw.data, width: sclRaw.width, height: sclRaw.height, res: sclRaw.res, originX: sclRaw.originX, originY: sclRaw.originY }, ref.width, ref.height, ref.originX, ref.originY, ref.res);
   const baseNdvis = [];
-  for (const b of bu) baseNdvis.push(ndvi(await onGrid(b.B04), await onGrid(b.B08)));
+  const baseScls = [];
+  for (const b of bu) {
+    baseNdvis.push(ndvi(await onGrid(b.B04), await onGrid(b.B08)));
+    if (process.env.FOREST_GATE) {
+      const bs = await readBandWindow(b.SCL, extent, utmDef, haloM);
+      baseScls.push(resampleNearest({ data: bs.data, width: bs.width, height: bs.height, res: bs.res, originX: bs.originX, originY: bs.originY }, ref.width, ref.height, ref.originX, ref.originY, ref.res));
+    }
+  }
   const TH = Number(process.env.TH ?? -0.15);
   const MINPX = Number(process.env.MINPX ?? 50);
-  const det = detectWindow(red, nir, scl, baseNdvis, 'DEFORESTATION', { dndviThreshold: TH, minPx: MINPX });
+  const det = detectWindow(red, nir, scl, baseNdvis, 'DEFORESTATION',
+    { dndviThreshold: TH, minPx: MINPX, ...(process.env.FOREST_GATE ? { requireForest: true, forest: forestMask(baseScls) } : {}) });
   console.log(`  valid=${(det.validFracT0 * 100).toFixed(0)}% px_anomalos=${det.count} score=${det.uncalibrated.toFixed(2)}`);
   row.valid = +det.validFracT0.toFixed(3); row.count = det.count; row.score = +det.uncalibrated.toFixed(3);
   if (det.count === 0) { console.log('  -> FN (nada detectado)'); row.iou = 0; return 'fn'; }

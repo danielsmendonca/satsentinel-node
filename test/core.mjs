@@ -5,6 +5,7 @@ import { components, pixelBboxToRing, maskToMultiPolygon, traceContour } from '.
 import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
 import { computeWindow, resampleNearest, extentToUtm } from '../dist/src/fetcher/windows.js';
 import { isValidScl } from '../dist/src/pipeline/scl.js';
+import { forestMask } from '../dist/src/pipeline/scl.js';
 import { ChunkCache, coalescedGet } from '../dist/src/fetcher/cog.js';
 import { fromMnemonic, importPairing } from '../dist/src/identity/operator.js';
 import { mapLimit } from '../dist/src/ui/server.js';
@@ -185,8 +186,7 @@ test('mapLimit respeita concorrencia e preserva indices', async () => {
   assert.ok(peak <= 3 && peak > 1);
 });
 
-test('digest: deterministico, formato sha256:, muda com o conteudo', () => {
-  const d = mkdtempSync(join(tmpdir(), 'dig-'));
+test('digest: deterministico, formato sha256:, muda com o conteudo', () => {  const d = mkdtempSync(join(tmpdir(), 'dig-'));
   mkdirSync(join(d, 'sub'));
   writeFileSync(join(d, 'b.js'), 'b');
   writeFileSync(join(d, 'sub', 'a.js'), 'a');
@@ -196,4 +196,32 @@ test('digest: deterministico, formato sha256:, muda com o conteudo', () => {
   assert.ok(/^sha256:[0-9a-f]{64}$/.test(h1));
   writeFileSync(join(d, 'sub', 'a.js'), 'alterado');
   assert.notEqual(computeContainerDigest(d, '1.3.0'), h1);
+});
+
+test('forestMask: 2 de 3 com SCL=4 passa; 1 de 3 nao', () => {
+  const veg = new Uint8Array(4).fill(4);
+  const solo = new Uint8Array(4).fill(5);
+  assert.deepEqual([...forestMask([veg, veg, solo])], [1, 1, 1, 1]);
+  assert.deepEqual([...forestMask([veg, solo, solo])], [0, 0, 0, 0]);
+  assert.deepEqual([...forestMask([veg, solo])], [0, 0, 0, 0]); // 2 baselines: exige 2
+  assert.deepEqual([...forestMask([veg, veg])], [1, 1, 1, 1]);
+});
+
+test('gate floresta: anomalia em ex-pasto nao vota; em ex-floresta vota', () => {
+  const n = 8 * 8;
+  const red = new Float32Array(n).fill(800);
+  const nirBase = new Float32Array(n).fill(4000);
+  const nirNow = new Float32Array(n).fill(2000);
+  const base = ndvi(red, nirBase);
+  const sclNow = new Uint8Array(n).fill(5); // virou solo
+  const past = new Uint8Array(n).fill(5); // era pasto: sem voto
+  const fore = new Uint8Array(n).fill(4); // era floresta: vota
+  const semGate = detectWindow(red, nirNow, sclNow, [base, base], 'DEFORESTATION');
+  assert.ok(semGate.count > 0); // sem mascara: comportamento antigo preservado
+  const r1 = detectWindow(red, nirNow, sclNow, [base, base], 'DEFORESTATION',
+    { requireForest: true, forest: forestMask([past, past]) });
+  assert.equal(r1.count, 0);
+  const r2 = detectWindow(red, nirNow, sclNow, [base, base], 'DEFORESTATION',
+    { requireForest: true, forest: forestMask([fore, fore]) });
+  assert.ok(r2.count > 0);
 });

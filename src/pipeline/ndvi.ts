@@ -38,10 +38,13 @@ export interface WindowResult {
 export function detectWindow(
   red: Float32Array, nir: Float32Array, scl: Uint8Array,
   baselineNdvis: Float32Array[], cls: EventClass = 'DEFORESTATION',
-  opts: { dndviThreshold?: number; minPx?: number } = {},
+  opts: { dndviThreshold?: number; minPx?: number; requireForest?: boolean; forest?: Uint8Array } = {},
 ): WindowResult {
   const thr = opts.dndviThreshold ?? DNDVI_THRESHOLD;
   const minPx = opts.minPx ?? MIN_COMPONENT_PX;
+  // Gate floresta: so vota onde ERA floresta (mascara das baselines). Sem
+  // mascara fornecida, nao filtra (compat: testes e caminhos sem SCL historico).
+  const gate = opts.requireForest === true && opts.forest && opts.forest.length === red.length;
   const n = red.length;
   const vf = validFrac(scl, cls);
   const cur = ndvi(red, nir);
@@ -54,6 +57,7 @@ export function detectWindow(
   let sum = 0; let cnt = 0;
   for (let i = 0; i < n; i++) {
     if (!isValidScl(scl[i], cls)) continue;
+    if (gate && !(opts.forest as Uint8Array)[i]) continue;
     const d = cur[i] - med[i];
     if (d < thr) { mask[i] = 1; sum += d; cnt++; }
   }
