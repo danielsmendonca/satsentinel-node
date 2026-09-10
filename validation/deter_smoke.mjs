@@ -129,7 +129,7 @@ async function runSample(alert, idx, biome, row) {
   row.valid = +det.validFracT0.toFixed(3); row.count = det.count; row.score = +det.uncalibrated.toFixed(3);
   if (det.count === 0) { console.log('  -> FN (nada detectado)'); row.iou = 0; return 'fn'; }
   const mp = maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef,
-    Number(process.env.MINPX ?? 50), Number(process.env.MINFILL ?? 0));
+    Number(process.env.MINPX ?? 50), Number(process.env.MINFILL ?? 0.25));
   let best = 0;
   const boxes = [];
   for (const poly of mp?.coordinates ?? []) {
@@ -149,11 +149,13 @@ async function runSample(alert, idx, biome, row) {
 const TH = Number(process.env.TH ?? -0.15);
 const MINPX = Number(process.env.MINPX ?? 50);
 const MAXN = Number(process.env.MAXN ?? 12);
+const OFFSET = Number(process.env.OFFSET ?? 0);
 const OUT = process.env.OUT ?? `./validation/tuning_TH${TH}_PX${MINPX}.jsonl`;
 if (!process.env.APPEND) { try { unlinkSync(OUT); } catch {} }
 
 const LAYERS = [
   { biome: 'amazonia', type: 'deter-amz:deter_amz', bbox: '-52.5,-7.5,-51,-6', max: 200 },
+  { biome: 'amazonia', type: 'deter-amz:deter_amz', bbox: '-54,-10,-50,-5', max: 150 },
   { biome: 'cerrado', type: 'deter-cerrado-nb:deter_cerrado', bbox: '-46,-12,-45,-11', max: 60 },
 ];
 const all = [];
@@ -189,17 +191,29 @@ for (const f of all) {
 }
 for (const g of groups.values()) g.sort((a, b) => (b.properties.areamunkm ?? 0) - (a.properties.areamunkm ?? 0));
 const cands = [];
+const seenAlerts = new Set();
 const keys = [...groups.keys()].sort();
-let round = 0;
-while (cands.length < MAXN) {
-  let added = false;
+const cursor = new Map(keys.map((k) => [k, 0]));
+let added = true;
+while (cands.length < MAXN && added) {
+  added = false;
   for (const k of keys) {
     const g = groups.get(k);
-    if (g.length > round) { cands.push(g[round]); added = true; }
+    let i = cursor.get(k);
+    while (i < g.length) {
+      const c = g[i++];
+      const p = c.properties;
+      const [lo, la] = centroid(c.geometry.coordinates[0][0]);
+      const dk = `${p.view_date}|${la.toFixed(3)}|${lo.toFixed(3)}`;
+      if (seenAlerts.has(dk)) continue;
+      seenAlerts.add(dk);
+      cands.push(c);
+      added = true;
+      break;
+    }
+    cursor.set(k, i);
     if (cands.length >= MAXN) break;
   }
-  if (!added) break;
-  round++;
 }
 console.log(`candidatos: ${cands.length} (${[...groups.keys()].length} estratos bioma/mes) TH=${TH} MINPX=${MINPX}`);
 if (process.env.LIST_ONLY) {
@@ -215,7 +229,7 @@ const withTimeout = (p, ms, label) => Promise.race([
   p, new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout ${label}`)), ms)),
 ]);
 let i = 0;
-for (const c of cands) {
+for (const c of cands.slice(OFFSET)) {
   i++;
   const t0 = Date.now();
   const row = { thr: TH, minpx: MINPX, biome: c._biome, date: c.properties.view_date, cls: c.properties.classname, area: c.properties.areamunkm };
