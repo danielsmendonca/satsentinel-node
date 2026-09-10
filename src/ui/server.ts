@@ -280,6 +280,18 @@ export async function buildLocalUi(configDir = 'config') {
     if (!r.ok) return reply.code(502).send({ error: `server activity: ${r.status}` });
     return reply.send(await r.json());
   });
+  // Rastro do quadrante (proxy p/ timeline do server).
+  app.get('/api/history', async (req, reply) => {
+    const { cfg } = loadOrCreate(configDir);
+    const q = req.query as Record<string, string>;
+    if (!q.h || !/^[0-9a-f]{15}$/.test(q.h)) {
+      return reply.code(400).send({ error: 'h=h3 res6 obrigatorio' });
+    }
+    const base = cfg.server_url.replace(/\/$/, '');
+    const r = await fetch(`${base}/v1/cells/${q.h}/history`);
+    if (!r.ok) return reply.code(502).send({ error: `server history: ${r.status}` });
+    return reply.send(await r.json());
+  });
   app.post('/api/aoi', async (req, reply) => {
     const body = req.body as { polygon?: unknown; h3_cells?: unknown; h3_centers?: unknown };
     const patch: Record<string, unknown> = {};
@@ -447,6 +459,7 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 <div class="flex gap-2 mb-2"><button id="adopt-all" class="flex-1 text-sm px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 btn-glow">➕ Visíveis</button>
 <button id="adopt-clear" class="text-sm px-3 py-2 rounded-lg border border-rose-500/60 text-rose-300">Limpar</button></div>
 <div id="msg2" class="text-xs text-slate-500 mb-2"></div>
+<div id="hist"></div>
 <div id="list"></div>
 </section>
 <section id="v-tasks" style="display:none">
@@ -757,11 +770,41 @@ function renderList(){
   const el=$('list');
   if(adopted.size===0){el.innerHTML='<div class="hint">Nenhum adotado. Vá em ➕ Adotar.</div>';return;}
   el.innerHTML=[...adopted].map(h=>'<div class="row"><span class="grow"><code>'+h+'</code></span>'+
+    '<button class="act" data-hist="'+h+'">📜</button>'+
     (centers[h]?'<button class="act" data-go="'+h+'">📍 ver</button>':'<span class="pill">sem posição</span>')+
     '<button class="danger" data-un="'+h+'">Abandonar</button></div>').join('');
   el.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>goTo(b.dataset.go));
+  el.querySelectorAll('[data-hist]').forEach(b=>b.onclick=()=>showHist(b.dataset.hist));
   el.querySelectorAll('[data-un]').forEach(b=>b.onclick=async()=>{
     adopted.delete(b.dataset.un);await save();paintMine();renderList();refresh();});
+}
+async function showHist(h){
+  const el=$('hist');
+  el.innerHTML='<div class="hint">⏳ Carregando rastro de '+short12(h)+'…</div>';
+  try{
+    const j=await (await fetch('/api/history?h='+encodeURIComponent(h))).json();
+    const d=j.data||{tasks:[],votes:[],events:[]};
+    let html='<div class="row"><span class="grow"><b>📜 RASTRO ▦ '+short12(h)+'</b></span>'+
+      '<button class="act" id="hist-back">✖</button></div>';
+    if(!d.tasks.length)html+='<div class="hint">Sem tasks neste quadrante ainda.</div>';
+    for(const t of d.tasks){
+      const obs=String(t.observation_id||'');const base=String(t.baseline_scene||'');
+      html+='<div class="row"><span class="grow">📡 '+obs.slice(4,22)+' → base '+base.slice(4,22)+
+        '<br><small style="color:var(--dim)">'+t.event_class+' · '+t.status+' '+t.completed_count+'/'+t.redundancy_required+' votos · '+hhmm(t.created_at)+'</small></span></div>';
+      for(const v of d.votes.filter(x=>x.task_id===t.id)){
+        html+='<div class="row"><span class="grow" style="padding-left:14px">🗳 @'+String(v.operator_id).slice(0,8)+
+          ' · score '+Number(v.model_score).toFixed(2)+' · céu '+Math.round((v.valid_frac||0)*100)+'% · '+hhmm(v.created_at)+'</span></div>';
+      }
+    }
+    for(const e of d.events){
+      html+='<div class="row"><span class="grow">🔴 '+(e.lifecycle_state||'')+' '+(e.event_class||'')+
+        ' · conf '+Number(e.calibrated_confidence||0).toFixed(2)+' · IoU '+Number(e.spatial_agreement_iou||0).toFixed(2)+
+        ' · '+hhmm(e.created_at)+'</span></div>';
+    }
+    el.innerHTML=html;
+    $('hist-back').onclick=()=>{el.innerHTML='';};
+    icons();
+  }catch(e){el.innerHTML='<div class="hint">Falha no rastro: '+e+'</div>';}
 }
 $('adopt-all').onclick=async()=>{let n=0;for(const [h,o] of layers){if(adopted.size>=500)break;if(!o.mine&&!adopted.has(h)){adopted.add(h);stash(h,boundsCache.get(h));n++;}}
   await save();paintGrid();refresh();$('msg2').textContent=n+' adotado(s) desta vista (max 500).';};
