@@ -138,6 +138,57 @@ async function runSample(alert, idx, biome, row, expectZero = false) {
     row.outcome = 'skip-lowvalid';
     return 'skip';
   }
+  // Persistencia multi-temporal (R5, opt-in PERSIST=1): anomalia real (corte)
+  // persiste entre cenas; haze/borda de nuvem e transiente. Roda a mesma
+  // deteccao numa 2a cena limpa apos t0; row.persisted=true/false/'unknown'
+  // (sem 2a cena disponivel). Outcomes nao mudam; agregacao compara com/sem filtro.
+  if (process.env.PERSIST === '1' && det.count > 0) {
+    try {
+      const t1end = new Date(new Date(t0dt).getTime() + 60 * 864e5).toISOString();
+      const next = await stacSearch({
+        collections: ['sentinel-2-l2a'],
+        intersects: { type: 'Point', coordinates: [lon, lat] },
+        datetime: `${t0dt}/${t1end}`,
+        query: { 'eo:cloud_cover': { lt: 30 } },
+        sortby: [{ field: 'properties.datetime', direction: 'asc' }],
+        limit: 4,
+      });
+      const t1 = next.find((f) => f.id !== t0.id);
+      if (!t1) {
+        row.persisted = 'unknown';
+        console.log('  persist: sem 2a cena (unknown)');
+      } else {
+        const t1u = urls(t1);
+        if (!t1u.B04 || !t1u.B08 || !t1u.SCL) {
+          row.persisted = 'unknown';
+          console.log('  persist: assets incompletos (unknown)');
+        } else {
+          const red1 = await onGrid(t1u.B04);
+          const nir1 = await onGrid(t1u.B08);
+          const sclRaw1 = await readBandWindow(t1u.SCL, extent, utmDef, haloM);
+          const scl1 = resampleNearest({ data: sclRaw1.data, width: sclRaw1.width, height: sclRaw1.height, res: sclRaw1.res, originX: sclRaw1.originX, originY: sclRaw1.originY }, ref.width, ref.height, ref.originX, ref.originY, ref.res);
+          const det2 = detectWindow(red1, nir1, scl1, baseNdvis, 'DEFORESTATION',
+            { dndviThreshold: TH, minPx: MINPX, ...(process.env.FOREST_GATE ? { requireForest: true, forest: forestMask(baseScls) } : {}), width: ref.width, erodeValid: process.env.ERODE === '1' });
+          row.persisted = det2.count > 0;
+          row.persist_scene = t1.id;
+          row.persist_count = det2.count;
+          // Overlap espacial das máscaras: corte real persiste NO MESMO LUGAR;
+          // haze muda de lugar (ex: R5 FP 133px -> 526k px na 2a cena).
+          let inter = 0, union = 0;
+          for (let i = 0; i < det.mask.length; i++) {
+            const a = det.mask[i] === 1, b = det2.mask[i] === 1;
+            if (a && b) inter++;
+            if (a || b) union++;
+          }
+          row.persist_iou = union ? +(inter / union).toFixed(3) : 0;
+          console.log(`  persist: ${t1.id.slice(0, 21)} count=${det2.count} iou=${row.persist_iou} -> ${row.persisted ? 'PERSISTIU' : 'transiente'}`);
+        }
+      }
+    } catch (e) {
+      row.persisted = 'unknown';
+      console.log(`  persist: erro (${String(e.message).slice(0, 60)})`);
+    }
+  }
   if (expectZero) {
     // controle negativo (mata estavel): qualquer deteccao = falso-positivo
     const o = det.count === 0 ? 'tn' : 'fp';
@@ -294,3 +345,39 @@ const prec = tp + fp ? tp / (tp + fp) : 0;
 const f1 = prec + rec ? (2 * prec * rec) / (prec + rec) : 0;
 console.log(`\nTH=${TH} PX=${MINPX}: TP=${tp} FN=${fn} TN=${tn} FP=${fp} skips=${res.skip} -> ${OUT}`);
 console.log(`recall=${rec.toFixed(2)} precision=${prec.toFixed(2)} F1=${f1.toFixed(2)}`);
+if (process.env.PERSIST === '1') {
+  // Métrica com filtro de persistência: detecção só vale se persistiu em 2 cenas.
+  // tp/fp não-persistidos viram fn/tn; 'unknown' mantém outcome original (falta de dados ≠ transiente).
+  const { readFileSync } = await import('node:fs');
+  const rows = readFileSync(OUT, 'utf8').trim().split('\n').map(JSON.parse);
+  let ftp = 0, ffn = 0, ftn = 0, ffp = 0;
+  for (const r of rows) {
+    const o = r.outcome;
+    if (o === 'tp') { if (r.persisted === false) ffn++; else ftp++; }
+    else if (o === 'fn') ffn++;
+    else if (o === 'fp') { if (r.persisted === false) ftn++; else ffp++; }
+    else if (o === 'tn') ftn++;
+  }
+    const frec = ftp + ffn ? ftp / (ftp + ffn) : 0;
+  const fprec = ftp + ffp ? ftp / (ftp + ffp) : 0;
+  const ff1 = fprec + frec ? (2 * fprec * frec) / (fprec + frec) : 0;
+  console.log(`PERSIST-filter: TP=${ftp} FN=${ffn} TN=${ftn} FP=${ffp}`);
+  console.log(`recall=${frec.toFixed(2)} precision=${fprec.toFixed(2)} F1=${ff1.toFixed(2)}`);
+  // Filtro estrito: exige overlap espacial (mesmo lugar) persist_iou>=0.3.
+  // 'unknown' mantem outcome (falta de dados ≠ transiente).
+  let stp = 0, sfn = 0, stn = 0, sfp = 0;
+  for (const r of rows) {
+    const kept = r.persisted === true && (r.persist_iou ?? 0) >= 0.3;
+    const dropped = r.persisted === false || (r.persisted === true && (r.persist_iou ?? 0) < 0.3);
+    const o = r.outcome;
+    if (o === 'tp') { if (dropped) sfn++; else stp++; }
+    else if (o === 'fn') sfn++;
+    else if (o === 'fp') { if (dropped || r.persisted !== true) { if (r.persisted === 'unknown') sfp++; else stn++; } else sfp++; }
+    else if (o === 'tn') stn++;
+  }
+  const srec = stp + sfn ? stp / (stp + sfn) : 0;
+  const sprec = stp + sfp ? stp / (stp + sfp) : 0;
+  const sf1 = sprec + srec ? (2 * sprec * srec) / (sprec + srec) : 0;
+  console.log(`PERSIST-strict(iou>=0.3): TP=${stp} FN=${sfn} TN=${stn} FP=${sfp}`);
+  console.log(`recall=${srec.toFixed(2)} precision=${sprec.toFixed(2)} F1=${sf1.toFixed(2)}`);
+}
