@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ndvi, detectWindow } from '../dist/src/pipeline/ndvi.js';
-import { components, pixelBboxToRing, maskToMultiPolygon, traceContour } from '../dist/src/pipeline/vectorize.js';
+import { components, pixelBboxToRing, maskToMultiPolygon, traceContour, simplifyRing } from '../dist/src/pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
 import { computeWindow, resampleNearest, extentToUtm } from '../dist/src/fetcher/windows.js';
 import { isValidScl } from '../dist/src/pipeline/scl.js';
@@ -172,6 +172,15 @@ test('traceContour: pixel isolado vira quadrado unitario', () => {
   const ring = traceContour(mask, W, H, 2, 2, 2, 2);
   assert.equal(ring.length, 5);
   assert.equal(shoelace(ring), 1);
+});
+
+test('simplifyRing: quadrado intacto, colineares removidos, anel fecha', () => {
+  const sq = [[0, 0], [4, 0], [8, 0], [8, 4], [8, 8], [4, 8], [0, 8], [0, 4], [0, 0]];
+  const s = simplifyRing(sq, 1.0);
+  assert.deepEqual(s, [[0, 0], [8, 0], [8, 8], [0, 8], [0, 0]]);
+  assert.equal(shoelace(s), 64);
+  const tiny = [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]];
+  assert.ok(simplifyRing(tiny, 1.0).length <= 5);
 });
 
 test('mapLimit respeita concorrencia e preserva indices', async () => {
