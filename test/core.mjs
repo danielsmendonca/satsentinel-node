@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ndvi, detectWindow } from '../dist/src/pipeline/ndvi.js';
-import { components, pixelBboxToRing, maskToMultiPolygon, traceContour, simplifyRing } from '../dist/src/pipeline/vectorize.js';
+import { components, pixelBboxToRing, maskToMultiPolygon, traceContour, simplifyRing, snapRing } from '../dist/src/pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
 import { computeWindow, resampleNearest, extentToUtm } from '../dist/src/fetcher/windows.js';
 import { isValidScl } from '../dist/src/pipeline/scl.js';
@@ -174,8 +174,7 @@ test('traceContour: pixel isolado vira quadrado unitario', () => {  const W = 5,
   assert.equal(shoelace(ring), 1);
 });
 
-test('simplifyRing: quadrado intacto, colineares removidos, anel fecha', () => {
-  const sq = [[0, 0], [4, 0], [8, 0], [8, 4], [8, 8], [4, 8], [0, 8], [0, 4], [0, 0]];
+test('simplifyRing: quadrado intacto, colineares removidos, anel fecha', () => {  const sq = [[0, 0], [4, 0], [8, 0], [8, 4], [8, 8], [4, 8], [0, 8], [0, 4], [0, 0]];
   const s = simplifyRing(sq, 1.0);
   assert.deepEqual(s, [[0, 0], [8, 0], [8, 8], [0, 8], [0, 0]]);
   assert.equal(shoelace(s), 64);
@@ -275,4 +274,13 @@ test('ndvi layer: mediana e cor', () => {
   assert.equal(medianOf([0.2, 0.8]), 0.5);
   assert.equal(ndviColor(0), '#78643c');
   assert.equal(ndviColor(1), '#22c55e');
+});
+
+test('snapRing: tira quase-duplicados e mantém fecho (anti-GEOS-XX000)', () => {
+  const ring = [[0, 0], [1, 0], [1 + 1e-12, 0], [1, 1], [0, 1], [0, 0]];
+  const s = snapRing(ring);
+  assert.deepEqual(s, [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]);
+  for (let i = 1; i < s.length; i++) {
+    assert.ok(Math.hypot(s[i][0] - s[i - 1][0], s[i][1] - s[i - 1][1]) > 0);
+  }
 });

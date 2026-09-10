@@ -69,27 +69,45 @@ export function maskToMultiPolygon(
     return [Math.min(180, Math.max(-180, lon)), Math.min(90, Math.max(-90, lat))];
   };
   const polys: number[][][][] = [];
-  let budget = 4000; // teto de vertices por task (protocolo: anel<=1000)
+  // traça tudo em pixel, depois simplifica até o TOTAL caber no protocolo (<=450 vertices)
+  type Traced = { kind: 'px'; ring: Array<[number, number]> } | { kind: 'll'; ring: Array<[number, number]> };
+  const traced: Traced[] = [];
   for (const k of comps) {
-    if (budget <= 0) break;
     try {
-      let corners = traceContour(mask, W, H, k.c0, k.r0, k.c1, k.r1);
-      // simplifica até caber no protocolo (anel<=1000 pts)
-      let tol = 1.5;
-      while (corners.length > 900 && tol < 32) {
-        tol *= 2;
-        corners = simplifyRing(corners, tol);
-      }
-      if (corners.length < 4 || corners.length > 1000) {
-        corners = pixelBboxToRing(k.c0, k.r0, k.c1, k.r1, originX, originY, res, utmDef);
-      }
-      budget -= corners.length;
-      polys.push([corners.map(([x, y]) => toLonLat(x, y))]);
+      traced.push({ kind: 'px', ring: traceContour(mask, W, H, k.c0, k.r0, k.c1, k.r1) });
     } catch {
-      polys.push([pixelBboxToRing(k.c0, k.r0, k.c1, k.r1, originX, originY, res, utmDef)]);
+      traced.push({ kind: 'll', ring: pixelBboxToRing(k.c0, k.r0, k.c1, k.r1, originX, originY, res, utmDef) });
     }
   }
+  const totalPx = () => traced.reduce((a, t) => a + (t.kind === 'px' ? t.ring.length : 0), 0);
+  let tol = 1.5;
+  while (totalPx() > 450 && tol < 512) {
+    tol *= 2;
+    for (const t of traced) if (t.kind === 'px') t.ring = simplifyRing(t.ring, tol);
+  }
+  for (const t of traced) {
+    if (t.ring.length < 4) continue;
+    polys.push(t.kind === 'px' ? [snapRing(t.ring.map(([x, y]) => toLonLat(x, y)))] : [t.ring]);
+  }
   return polys.length > 0 ? { type: 'MultiPolygon', coordinates: polys } : null;
+}
+
+/**
+ * Arredonda p/ ~1cm e tira quase-duplicados consecutivos (inclusive no fecho).
+ * Sem isso, cantos quase-coincidentes viram segmentos de comprimento ~zero
+ * e o overlay do GEOS morre com non-noded intersection (XX000) no PostGIS.
+ */
+export function snapRing(ring: Array<[number, number]>, grid = 1e-7): Array<[number, number]> {
+  const q = ring.map(([x, y]) => [Math.round(x / grid) * grid, Math.round(y / grid) * grid] as [number, number]);
+  const out: Array<[number, number]> = [];
+  for (const p of q) {
+    const l = out[out.length - 1];
+    if (!l || l[0] !== p[0] || l[1] !== p[1]) out.push(p);
+  }
+  const f0 = out[0];
+  const fl = out[out.length - 1];
+  if (fl[0] !== f0[0] || fl[1] !== f0[1]) out.push([...f0]);
+  return out;
 }
 
 /**
@@ -141,8 +159,23 @@ export function simplifyRing(ring: Array<[number, number]>, tol: number): Array<
     pts = next;
     if (!changed) break;
   }
-  pts.push([...pts[0]]);
-  return pts;
+  // tira duplicados consecutivos (inclusive no fecho): ponto repetido vira
+  // segmento de comprimento zero e derruba o overlay do GEOS (non-noded).
+  const dedup: Array<[number, number]> = [];
+  for (const p of pts) {
+    const l = dedup[dedup.length - 1];
+    if (!l || l[0] !== p[0] || l[1] !== p[1]) dedup.push(p);
+  }
+  // garante fecho: ultimo == primeiro, sem triplicar
+  const f0 = dedup[0];
+  const fl = dedup[dedup.length - 1];
+  if (fl[0] !== f0[0] || fl[1] !== f0[1]) dedup.push([...f0]);
+  while (dedup.length > 5) {
+    const a = dedup[dedup.length - 2], b = dedup[dedup.length - 1];
+    if (a[0] === f0[0] && a[1] === f0[1] && b[0] === f0[0] && b[1] === f0[1]) dedup.pop();
+    else break;
+  }
+  return dedup;
 }
 
 /**

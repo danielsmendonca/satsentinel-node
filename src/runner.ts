@@ -184,18 +184,25 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
     const d = (accepted!.data ?? {}) as { event_id?: string | null; decision?: string; quorum_state?: string };
     return { status: 'reported', taskId: lease.task_id, h3: lease.h3_index, score, eventId: d.event_id ?? null, decision: d.decision, quorum: d.quorum_state };
   } catch (e) {
-    // falha honesta: marca FAILED (libera p/ outros, exclui este no) em vez de votar lixo
-    const reason = failReason(e);
-    await fetch(`${base}/v1/tasks/${lease.assignment_id}/fail`, {
-      method: 'POST', headers: { 'content-type': 'application/json', ...auth },
-      body: JSON.stringify({ reason }),
-    }).catch(() => undefined);
-    return { status: 'failed', taskId: lease.task_id, h3: lease.h3_index, error: `${reason}: ${String(e).slice(0, 120)}` };
+    // falha honesta: marca FAILED (libera p/ outros, exclui este no) em vez de votar lixo.
+    // Excecao: erro 5xx DO server (transitorio, ex: consenso) -> nao marca nada;
+    // o lease expira sozinho e o voto pode ser refeito depois.
+    const msg = String(e instanceof Error ? e.message : e);
+    if (!/-> 5\d\d/.test(msg)) {
+      const reason = failReason(e);
+      await fetch(`${base}/v1/tasks/${lease.assignment_id}/fail`, {
+        method: 'POST', headers: { 'content-type': 'application/json', ...auth },
+        body: JSON.stringify({ reason }),
+      }).catch(() => undefined);
+      return { status: 'failed', taskId: lease.task_id, h3: lease.h3_index, error: `${reason}: ${msg.slice(0, 120)}` };
+    }
+    return { status: 'failed', taskId: lease.task_id, h3: lease.h3_index, error: `SERVER: ${msg.slice(0, 120)}` };
   }
 }
 
 function failReason(e: unknown): string {
   const m = String(e instanceof Error ? e.message : e);
+  if (/too_big|vertices|GEOMETRY/i.test(m)) return 'VETOR_GRANDE';
   if (/MGRS|mgrs|UTM|proj/i.test(m)) return 'MGRS_UNKNOWN';
   if (/baseline/i.test(m)) return 'NO_BASELINE';
   if (/janela|window|grande/i.test(m)) return 'WINDOW_EMPTY';
