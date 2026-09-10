@@ -1,10 +1,15 @@
 /**
- * @satsentinel/protocol v1.3.0
- * Contrato unico server <-> node (GDD v1.2 Sec 13/17/18).
+ * @satsentinel/protocol v1.4.0
+ * Contrato unico server <-> node (GDD v1.2 Sec 13/17/18 + R5 dual-epoch).
  * Fonte da verdade: satsentinel-node/protocol. Copia vendored em
  * satsentinel-server/src/vendor/protocol (sincronizar apos bump: rebuild + copiar).
  * Regra: server rejeita payload que falhe no Zod, digest fora da allowlist
  * ou assinatura invalida. Node rejeita task com dataset_version desconhecida.
+ *
+ * v1.4.0 (compatível com 1.3.0): tasks DUAL_EPOCH carregam `epoch2` (2a cena
+ * limpa apos t0) em cog_urls; reports podem trazer `persistence` (evidencia
+ * de que a anomalia persistiu no mesmo lugar). Tudo opcional: payloads 1.3.0
+ * continuam válidos.
  */
 import { z } from 'zod';
 import { ed25519 } from '@noble/curves/ed25519';
@@ -14,7 +19,7 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 // ---------------------------------------------------------------------------
 // Constantes congeladas (GDD v1.2 Sec 16/19)
 // ---------------------------------------------------------------------------
-export const PROTOCOL_VERSION = '1.3.0' as const;
+export const PROTOCOL_VERSION = '1.4.0' as const;
 export const ALGORITHM_VERSION = 'DETERMINISTIC_NDVI_v1.2.0' as const;
 export const PROCESSING_PROFILES = [
   'MVP_AMAZON_R6_HALO128',
@@ -171,15 +176,24 @@ const baselineCogSchema = z
   })
   .strict();
 
+export const epochCogSchema = baselineCogSchema;
+export type EpochCog = z.infer<typeof epochCogSchema>;
+
 export const cogUrlsSchema = z
   .object({
     B04: urlSchema,
     B08: urlSchema,
     SCL: urlSchema,
     baselines: z.array(baselineCogSchema).min(2).max(3),
+    /** v1.4: 2a cena limpa apos t0 (mesmo tile). Ausente = task SINGLE (1.3). */
+    epoch2: baselineCogSchema.optional(),
   })
   .strict();
 export type CogUrls = z.infer<typeof cogUrlsSchema>;
+
+/** v1.4: tasks DUAL_EPOCH exigem voto com evidencia de persistencia (R5). */
+export const taskKindSchema = z.enum(['SINGLE', 'DUAL_EPOCH']);
+export type TaskKind = z.infer<typeof taskKindSchema>;
 
 export const radiometricQSchema = z
   .object({
@@ -216,11 +230,28 @@ export const leaseRespSchema = z
     mgrs_tile: z.string().min(5).max(10),
     dataset_version: z.string().startsWith(KNOWN_DATASET_PREFIX),
     event_class: eventClassSchema, // v1.3: classe cacada nesta task (pipeline usa a SCL correspondente)
+    /** v1.4: ausente = SINGLE (compat 1.3). Server deriva de cog_urls.epoch2. */
+    task_kind: taskKindSchema.optional(),
     cog_urls: cogUrlsSchema,
     lease_until: z.string().datetime(),
   })
   .strict();
 export type LeaseResponse = z.infer<typeof leaseRespSchema>;
+
+/**
+ * v1.4: evidencia de persistencia multi-temporal (R5). O no roda a deteccao
+ * em t0 e na epoch2 (mesma grade/baselines) e reporta: persisted=false
+ * (transiente -> vota null) ou IoU espacial das mascaras.
+ */
+export const persistenceSchema = z
+  .object({
+    epoch2_scene: z.string().min(10).max(150),
+    persist_count: z.number().int().min(0),
+    persist_iou: z.number().min(0).max(1),
+    persisted: z.boolean(),
+  })
+  .strict();
+export type PersistenceEvidence = z.infer<typeof persistenceSchema>;
 
 export const reportReqSchema = z
   .object({
@@ -231,6 +262,8 @@ export const reportReqSchema = z
     geometry: z.union([z.null(), multiPolygonSchema]),
     model_score: z.number().min(0).max(1),
     event_class: eventClassSchema, // v1.3: deve igualar a event_class do lease
+    /** v1.4 opcional: evidencia de persistencia (exigida em tasks DUAL_EPOCH). */
+    persistence: persistenceSchema.optional(),
     radiometric_quality: radiometricQSchema,
     execution_time_ms: z.number().int().min(LIMITS.MIN_EXEC_MS).max(LIMITS.MAX_EXEC_MS),
     container_digest: digestSchema,

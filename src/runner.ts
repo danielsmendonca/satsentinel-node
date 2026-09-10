@@ -13,7 +13,7 @@ import { hexToBytes, bytesToHex } from '@noble/hashes/utils';
 import { ed25519 } from '@noble/curves/ed25519';
 import { signPayload } from '@satsentinel/protocol';
 import { loadOrCreate } from './identity/operator.js';
-import { detectWindow, ndvi, MIN_VALID_FRAC } from './pipeline/ndvi.js';
+import { detectWindow, ndvi, MIN_VALID_FRAC, PERSIST_IOU_MIN, maskIoU } from './pipeline/ndvi.js';
 import { maskToMultiPolygon } from './pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from './fetcher/mgrs.js';
 import { forestMask } from './pipeline/scl.js';
@@ -71,6 +71,7 @@ export interface RunDetail {
   eventId?: string | null;
   decision?: string;
   quorum?: string;
+  persisted?: boolean;
   error?: string;
 }
 
@@ -81,17 +82,51 @@ export async function runOnce(configDir = 'config'): Promise<string> {
 type Lease = {
   assignment_id: string; task_id: string; observation_id: string; h3_index: string; mgrs_tile: string;
   event_class: 'DEFORESTATION' | 'WATER_BODY_CHANGE'; baseline_scene: string;
-  cog_urls: { B04: string; B08: string; SCL: string; baselines: Array<{ scene: string; B04: string; B08: string; SCL: string }> };
+  task_kind?: 'SINGLE' | 'DUAL_EPOCH'; // v1.4: ausente = SINGLE (compat 1.3)
+  cog_urls: { B04: string; B08: string; SCL: string; baselines: Array<{ scene: string; B04: string; B08: string; SCL: string }>; epoch2?: { scene: string; B04: string; B08: string; SCL: string } };
 };
+
+export interface PersistenceEvidence {
+  epoch2_scene: string; persist_count: number; persist_iou: number; persisted: boolean;
+}
+
+interface GridRef { width: number; height: number; res: number; originX: number; originY: number; }
+
+/**
+ * Deteccao na epoch2 (v1.4): mesmas grade/baselines/opts de t0. Falha de
+ * download da 2a cena propaga (fail honesto NO_EPOCH2/COG) — nunca vota cego.
+ */
+async function detectEpoch(
+  lease: Lease, extent: [number, number, number, number], utmDef: string, ref: GridRef,
+  readOnGrid: (url: string) => Promise<{ data: Float32Array; originX: number; originY: number }>,
+  baseNdvis: Float32Array[], eventClass: 'DEFORESTATION' | 'WATER_BODY_CHANGE',
+  detOpts: { requireForest?: boolean; forest?: Uint8Array },
+): Promise<{ mask: Uint8Array; count: number }> {
+  const e2 = lease.cog_urls.epoch2!;
+  const red = (await readOnGrid(e2.B04)).data;
+  const nir = (await readOnGrid(e2.B08)).data;
+  const sclRaw = await readBandWindow(e2.SCL, extent, utmDef, 1280);
+  const scl = resampleNearest(
+    { data: sclRaw.data, width: sclRaw.width, height: sclRaw.height, res: sclRaw.res, originX: sclRaw.originX, originY: sclRaw.originY },
+    ref.width, ref.height, ref.originX, ref.originY, ref.res,
+  );
+  const det = detectWindow(red, nir, scl, baseNdvis, eventClass, detOpts);
+  return { mask: det.mask, count: det.count };
+}
 
 /**
  * Pipeline real sobre COGs (GDD Sec 7): janelas B04/B08/SCL de t0 + baselines,
  * NDVI, mediana temporal, dNDVI, vetorizacao. Nada sintético: qualquer falha
  * propaga para o chamador marcar FAILED em vez de votar lixo.
+ *
+ * v1.4 DUAL_EPOCH: com epoch2 congelada, roda a mesma deteccao na 2a cena
+ * (mesma grade/baselines). Transiente (sem deteccao ou IoU < PERSIST_IOU_MIN)
+ * vota NULO honesto em vez de FP; o server recebe a evidencia em `persistence`.
+ * Exportado p/ validacao live (validation/dual_live.mjs) — producao usa via runOnceDetailed.
  */
-async function processReal(
+export async function processReal(
   lease: Lease, eventClass: 'DEFORESTATION' | 'WATER_BODY_CHANGE',
-): Promise<{ geometry: { type: 'MultiPolygon'; coordinates: number[][][][] } | null; score: number; validFrac: number }> {
+): Promise<{ geometry: { type: 'MultiPolygon'; coordinates: number[][][][] } | null; score: number; validFrac: number; persistence?: PersistenceEvidence }> {
   const mgrs = lease.mgrs_tile && lease.mgrs_tile !== 'UNKNOWN'
     ? lease.mgrs_tile : parseMgrsTile(lease.observation_id, {});
   const { def: utmDef } = utmFromMgrs(mgrs);
@@ -143,6 +178,23 @@ async function processReal(
   const det = detectWindow(red, nir, scl, baseNdvis, eventClass,
     forest ? { requireForest: true, forest } : {});
   if (det.validFracT0 < MIN_VALID_FRAC) throw new Error(`valid_frac=${det.validFracT0.toFixed(2)} abaixo de ${MIN_VALID_FRAC} (nuvem/haze)`);
+  // v1.4 DUAL_EPOCH: confirma na 2a cena antes de votar (R5).
+  const epoch2 = lease.cog_urls.epoch2;
+  if ((lease.task_kind ?? 'SINGLE') === 'DUAL_EPOCH' || epoch2) {
+    if (!epoch2) throw new Error('NO_EPOCH2: task DUAL sem epoch2 congelada');
+    if (det.count > 0) {
+      const detOpts = forest ? { requireForest: true, forest } : {};
+      const e2 = await detectEpoch(lease, extent, utmDef, ref, readOnGrid, baseNdvis, eventClass, detOpts);
+      const piou = maskIoU(det.mask, e2.mask);
+      const persisted = e2.count > 0 && piou >= PERSIST_IOU_MIN;
+      const persistence: PersistenceEvidence = { epoch2_scene: epoch2.scene, persist_count: e2.count, persist_iou: +piou.toFixed(3), persisted };
+      if (!persisted) {
+        return { geometry: null, score: 0, validFrac: det.validFracT0, persistence };
+      }
+      const geometry = maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef, 50, 0.25);
+      return { geometry, score: geometry ? det.uncalibrated : 0, validFrac: det.validFracT0, persistence };
+    }
+  }
   const geometry = det.count > 0
     ? maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef, 50, 0.25)
     : null;
@@ -162,12 +214,20 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
   const lease = ((await leaseRes.json()) as { data: {
     assignment_id: string; task_id: string; observation_id: string; h3_index: string; mgrs_tile: string;
     event_class: 'DEFORESTATION' | 'WATER_BODY_CHANGE'; baseline_scene: string;
-    cog_urls: { B04: string; B08: string; SCL: string; baselines: Array<{ scene: string; B04: string; B08: string; SCL: string }> };
+    task_kind?: 'SINGLE' | 'DUAL_EPOCH';
+    cog_urls: { B04: string; B08: string; SCL: string; baselines: Array<{ scene: string; B04: string; B08: string; SCL: string }>; epoch2?: { scene: string; B04: string; B08: string; SCL: string } };
   } }).data;
   const eventClass = lease.event_class ?? 'DEFORESTATION'; // protocolo 1.3: task diz a classe cacada
   const t0 = Date.now();
+  // Heartbeat periódico durante o processamento (voto DUAL baixa 2 cenas e
+  // estoura os 10min do lease sem isso). Limpa ao final (finally).
+  const hbTimer = setInterval(() => {
+    fetch(`${base}/v1/tasks/${lease.assignment_id}/heartbeat`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', ...auth }, body: '{}',
+    }).catch(() => undefined);
+  }, 120_000);
   try {
-    const { geometry, score, validFrac } = await processReal(lease, eventClass);
+    const { geometry, score, validFrac, persistence } = await processReal(lease, eventClass);
     // renova o lease antes de reportar (processamento real pode levar minutos)
     await fetch(`${base}/v1/tasks/${lease.assignment_id}/heartbeat`, {
       method: 'PUT', headers: { 'content-type': 'application/json', ...auth }, body: '{}',
@@ -176,17 +236,17 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
     const report: Record<string, unknown> = {
       assignment_id: lease.assignment_id, task_id: lease.task_id, node_id: cfg.node_id, operator_id: key.operator_id,
       geometry, model_score: score, event_class: eventClass,
+      ...(persistence ? { persistence } : {}),
       radiometric_quality: { valid_frac: validFrac, cloud_frac: 1 - validFrac, baseline_scene: lease.baseline_scene, eps: 1e-6 },
       execution_time_ms: execMs, container_digest: containerDigest, algorithm_sha256: bundleHash,
     };
     report.signature_hex = signPayload(report, hexToBytes(key.private_key_hex));
     const accepted = await api(base, '/v1/results/report', { method: 'POST', headers: auth, body: JSON.stringify(report) });
     const d = (accepted!.data ?? {}) as { event_id?: string | null; decision?: string; quorum_state?: string };
-    return { status: 'reported', taskId: lease.task_id, h3: lease.h3_index, score, eventId: d.event_id ?? null, decision: d.decision, quorum: d.quorum_state };
+    return { status: 'reported', taskId: lease.task_id, h3: lease.h3_index, score, eventId: d.event_id ?? null, decision: d.decision, quorum: d.quorum_state, ...(persistence ? { persisted: persistence.persisted } : {}) };
   } catch (e) {
-    // falha honesta: marca FAILED (libera p/ outros, exclui este no) em vez de votar lixo.
-    // Excecao: erro 5xx DO server (transitorio, ex: consenso) -> nao marca nada;
-    // o lease expira sozinho e o voto pode ser refeito depois.
+    // Falha honesta marca FAILED (libera p/ outros, exclui este no). Excecao:
+    // 5xx do server (transitorio) -> nao marca; o lease expira e o voto refaz.
     const msg = String(e instanceof Error ? e.message : e);
     if (!/-> 5\d\d/.test(msg)) {
       const reason = failReason(e);
@@ -197,6 +257,8 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
       return { status: 'failed', taskId: lease.task_id, h3: lease.h3_index, error: `${reason}: ${msg.slice(0, 120)}` };
     }
     return { status: 'failed', taskId: lease.task_id, h3: lease.h3_index, error: `SERVER: ${msg.slice(0, 120)}` };
+  } finally {
+    clearInterval(hbTimer);
   }
 }
 
@@ -205,6 +267,7 @@ function failReason(e: unknown): string {
   if (/too_big|vertices|GEOMETRY/i.test(m)) return 'VETOR_GRANDE';
   if (/MGRS|mgrs|UTM|proj/i.test(m)) return 'MGRS_UNKNOWN';
   if (/baseline/i.test(m)) return 'NO_BASELINE';
+  if (/EPOCH2|epoch2/i.test(m)) return 'NO_EPOCH2';
   if (/janela|window|grande/i.test(m)) return 'WINDOW_EMPTY';
   if (/LOW_VALID|valid_frac|nuvem|cloud/i.test(m)) return 'LOW_VALID';
   return 'COG_FETCH';

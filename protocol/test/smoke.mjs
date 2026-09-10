@@ -4,7 +4,7 @@ import {
   leaseReqSchema, leaseRespSchema, reportReqSchema, cogUrlsSchema,
   generateOperatorKeypair, signReport, verifyReport,
   operatorIdFromPublicKey, canonicalize,
-  ALGORITHM_VERSION,
+  ALGORITHM_VERSION, PROTOCOL_VERSION,
 } from '../dist/index.js';
 import { hexToBytes } from '@noble/hashes/utils';
 import { ed25519 } from '@noble/curves/ed25519';
@@ -87,6 +87,59 @@ test('lease response exige event_class (protocolo 1.3)', () => {
   const { event_class: _drop, ...semClasse } = base;
   assert.equal(leaseRespSchema.safeParse(semClasse).success, false);
   void _drop;
+});
+
+test('v1.4: task DUAL_EPOCH com epoch2 passa; SINGLE sem epoch2 continua valida', () => {
+  const dual = { ...COG, epoch2: { scene: 'S2A_T22MGB_20260406T133231_L2A', B04: 'https://example.com/e/B04.tif', B08: 'https://example.com/e/B08.tif', SCL: 'https://example.com/e/SCL.tif' } };
+  assert.equal(cogUrlsSchema.safeParse(dual).success, true);
+  assert.equal(cogUrlsSchema.safeParse(COG).success, true); // 1.3 sem epoch2
+  const lease = {
+    assignment_id: '123e4567-e89b-12d3-a456-426614174000',
+    task_id: '123e4567-e89b-12d3-a456-426614174001',
+    observation_id: 'S2A_T22MGB_20260401T133231_L2A',
+    baseline_scene: 'S2A_T22MGB_20260320T133231_L2A',
+    h3_index: '862a1072fffffff',
+    mgrs_tile: '22MGB',
+    dataset_version: 'S2L2A_E84v1_BASELINE05_2026-04',
+    event_class: 'DEFORESTATION',
+    task_kind: 'DUAL_EPOCH',
+    cog_urls: dual,
+    lease_until: new Date().toISOString(),
+  };
+  assert.equal(leaseRespSchema.safeParse(lease).success, true);
+  const { task_kind: _k, ...semKind } = lease;
+  assert.equal(leaseRespSchema.safeParse(semKind).success, true); // 1.3 sem task_kind
+  void _k;
+});
+
+test('v1.4: report com persistence passa e assina; sem persistence continua valido', () => {
+  const kp = generateOperatorKeypair();
+  const persist = { epoch2_scene: 'S2A_T22MGB_20260406T133231_L2A', persist_count: 1200, persist_iou: 0.46, persisted: true };
+  const base = {
+    assignment_id: '123e4567-e89b-12d3-a456-426614174000',
+    task_id: '123e4567-e89b-12d3-a456-426614174001',
+    node_id: '123e4567-e89b-12d3-a456-426614174002',
+    operator_id: kp.operatorId,
+    geometry: { type: 'MultiPolygon', coordinates: [[[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]] },
+    model_score: 0.8,
+    event_class: 'DEFORESTATION',
+    persistence: persist,
+    radiometric_quality: { valid_frac: 0.9, cloud_frac: 0.05, baseline_scene: 'S2A_T22MGB_20260320T133231_L2A', eps: 1e-6 },
+    execution_time_ms: 45000,
+    container_digest: 'sha256:' + 'b'.repeat(64),
+    algorithm_sha256: 'c'.repeat(64),
+  };
+  const full = { ...base, signature_hex: signReport(base, kp.privateKeyHex) };
+  assert.equal(reportReqSchema.safeParse(full).success, true);
+  assert.equal(verifyReport(full, kp.publicKeyHex), true);
+  const { persistence: _p, ...semPersist } = base;
+  const full2 = { ...semPersist, signature_hex: signReport(semPersist, kp.privateKeyHex) };
+  assert.equal(reportReqSchema.safeParse(full2).success, true); // 1.3 sem persistence
+  void _p;
+});
+
+test('PROTOCOL_VERSION travada em 1.4.0', () => {
+  assert.equal(PROTOCOL_VERSION, '1.4.0');
 });
 
 test('operator_id deriva da pubkey e canonico e deterministico', () => {

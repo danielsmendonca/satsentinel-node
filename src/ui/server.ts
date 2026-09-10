@@ -143,13 +143,24 @@ async function doRun(configDir: string): Promise<void> {
         if (remaining-- <= 0) break;
         runState.current = `votando (x3 paralelo)…`;
         const t1 = Date.now();
-        const d: RunDetail = await runOnceDetailed(configDir);
+        let d: RunDetail;
+        try {
+          d = await runOnceDetailed(configDir);
+        } catch (e) {
+          // 429 = rajada no rate-limit (fila com fails rapidos): recua sem matar a run.
+          if (/lease 429/.test(String(e))) {
+            await new Promise((r) => setTimeout(r, 65_000));
+            break;
+          }
+          throw e;
+        }
         runState.items.push({
           phase: d.status === 'idle' ? 'fila vazia' : d.status === 'failed' ? 'falha' : 'voto',
           ms: Date.now() - t1, taskId: d.taskId, h3: d.h3, score: d.score, result: d.status,
           eventId: d.eventId, decision: d.decision, error: (d as { error?: string }).error,
         });
         if (d.status === 'idle') break;
+        await new Promise((r) => setTimeout(r, 3000)); // respira entre leases (anti-rajada)
       }
     });
     const votes = runState.items.filter((x) => x.result === 'reported');

@@ -9,6 +9,23 @@ export const DNDVI_THRESHOLD = -0.15;
 export const MIN_COMPONENT_PX = 50;
 /** Fracao minima de ceu limpo p/ votar (tuning DETER: 0.6 mantem TPs, mata 30% dos FPs de borda de nuvem). */
 export const MIN_VALID_FRAC = 0.6;
+/**
+ * IoU minimo entre mascaras t0 x epoch2 p/ voto DUAL_EPOCH (R5: 0.05 mantem
+ * 2/2 TPs e mata 6/7 FPs; limiar conservador, n=9 — nao travar acima disso).
+ */
+export const PERSIST_IOU_MIN = 0.05;
+
+/** IoU entre duas mascaras binarias (mesma grade). 0 se uniao vazia. */
+export function maskIoU(a: Uint8Array, b: Uint8Array): number {
+  let inter = 0, union = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a[i] === 1, y = b[i] === 1;
+    if (x && y) inter++;
+    if (x || y) union++;
+  }
+  return union === 0 ? 0 : inter / union;
+}
 
 export function ndvi(red: Float32Array, nir: Float32Array): Float32Array {
   const out = new Float32Array(red.length);

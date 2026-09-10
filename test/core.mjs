@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ndvi, detectWindow, MIN_VALID_FRAC, erodeValidMask } from '../dist/src/pipeline/ndvi.js';
+import { ndvi, detectWindow, MIN_VALID_FRAC, PERSIST_IOU_MIN, erodeValidMask, maskIoU } from '../dist/src/pipeline/ndvi.js';
 import { components, pixelBboxToRing, maskToMultiPolygon, traceContour, simplifyRing, snapRing } from '../dist/src/pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
 import { computeWindow, resampleNearest, extentToUtm } from '../dist/src/fetcher/windows.js';
@@ -18,6 +18,17 @@ import { generateMnemonic } from 'bip39';
 
 test('piso ceu-limpo trava em 0.6 (tuning DETER R2: mata FPs de borda sem perder TPs)', () => {
   assert.equal(MIN_VALID_FRAC, 0.6);
+});
+
+test('v1.4 DUAL_EPOCH: maskIoU mede overlap; limiar 0.05 (R5: mata 6/7 FPs, mantem 2/2 TPs)', () => {
+  assert.equal(PERSIST_IOU_MIN, 0.05);
+  const a = new Uint8Array(100); const b = new Uint8Array(100);
+  for (let i = 0; i < 50; i++) a[i] = 1;
+  for (let i = 25; i < 75; i++) b[i] = 1;
+  assert.ok(Math.abs(maskIoU(a, b) - 25 / 75) < 1e-9); // inter 25, uniao 75
+  assert.equal(maskIoU(new Uint8Array(10), new Uint8Array(10)), 0); // uniao vazia
+  assert.equal(maskIoU(a, new Uint8Array(100)), 0); // transiente total
+  assert.equal(maskIoU(a, a), 1);
 });
 
 test('erosao 1px limpa borda e mantem interior; linha fina some', () => {

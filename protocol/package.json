@@ -1,6 +1,6 @@
 {
   "name": "@satsentinel/protocol",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Contrato tipado unico entre satsentinel-server e satsentinel-node (GDD v1.2 Sec 18). Validade com Zod em ambos os lados.",
   "type": "module",
   "main": "./dist/index.js",
