@@ -10,6 +10,8 @@ import { maskToMultiPolygon } from '../dist/src/pipeline/vectorize.js';
 import { readBandWindow, resampleNearest } from '../dist/src/fetcher/windows.js';
 import { parseMgrsTile, utmFromMgrs } from '../dist/src/fetcher/mgrs.js';
 import { latLngToCell, cellToBoundary } from 'h3-js';
+import { appendFileSync } from 'node:fs';
+import { unlinkSync } from 'node:fs';
 
 const pick = (assets, ...keys) => {
   for (const k of keys) if (assets[k]?.href) return assets[k].href;
@@ -49,11 +51,11 @@ async function stacSearch(body) {
   return (await r.json()).features ?? [];
 }
 
-async function runSample(alert, idx) {
+async function runSample(alert, idx, biome, row) {
   const ring = alert.geometry.coordinates[0][0];
   const [lon, lat] = centroid(ring);
   const refBox = bboxOf(alert.geometry.coordinates);
-  console.log(`\n[${idx}] DETER ${alert.properties.classname} ${alert.properties.view_date} ${alert.properties.areamunkm?.toFixed?.(3)}km2 @ ${lat.toFixed(3)},${lon.toFixed(3)}`);
+  console.log(`\n[${idx}] ${biome} DETER ${alert.properties.classname} ${alert.properties.view_date} ${alert.properties.areamunkm?.toFixed?.(3)}km2 @ ${lat.toFixed(3)},${lon.toFixed(3)}`);
   // cena posterior mais próxima com pouco cloud
   const after = await stacSearch({
     collections: ['sentinel-2-l2a'],
@@ -67,6 +69,7 @@ async function runSample(alert, idx) {
   const t0 = after[0];
   const t0dt = t0.properties.datetime;
   console.log(`  t0: ${t0.id} ${t0dt.slice(0, 10)}`);
+  row.scene = t0.id;
   const since = new Date(new Date(t0dt).getTime() - 60 * 864e5).toISOString();
   const prev = await stacSearch({
     collections: ['sentinel-2-l2a'],
@@ -110,11 +113,14 @@ async function runSample(alert, idx) {
   const scl = resampleNearest({ data: sclRaw.data, width: sclRaw.width, height: sclRaw.height, res: sclRaw.res, originX: sclRaw.originX, originY: sclRaw.originY }, ref.width, ref.height, ref.originX, ref.originY, ref.res);
   const baseNdvis = [];
   for (const b of bu) baseNdvis.push(ndvi(await onGrid(b.B04), await onGrid(b.B08)));
-  const det = detectWindow(red, nir, scl, baseNdvis, 'DEFORESTATION',
-    { dndviThreshold: Number(process.env.TH ?? -0.15) });
+  const TH = Number(process.env.TH ?? -0.15);
+  const MINPX = Number(process.env.MINPX ?? 50);
+  const det = detectWindow(red, nir, scl, baseNdvis, 'DEFORESTATION', { dndviThreshold: TH, minPx: MINPX });
   console.log(`  valid=${(det.validFracT0 * 100).toFixed(0)}% px_anomalos=${det.count} score=${det.uncalibrated.toFixed(2)}`);
-  if (det.count === 0) { console.log('  -> FN (nada detectado)'); return 'fn'; }
-  const mp = maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef);
+  row.valid = +det.validFracT0.toFixed(3); row.count = det.count; row.score = +det.uncalibrated.toFixed(3);
+  if (det.count === 0) { console.log('  -> FN (nada detectado)'); row.iou = 0; return 'fn'; }
+  const mp = maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef,
+    Number(process.env.MINPX ?? 50));
   let best = 0;
   const boxes = [];
   for (const poly of mp?.coordinates ?? []) {
@@ -127,30 +133,95 @@ async function runSample(alert, idx) {
     boxes.slice(0, 5).forEach((b, i) => console.log(`  det${i}=${b.map((v) => v.toFixed(4)).join(',')}`));
   }
   console.log(`  -> IoU=${best.toFixed(2)} ${best >= 0.5 ? 'TP' : 'FN'}`);
+  row.iou = +best.toFixed(3);
   return best >= 0.5 ? 'tp' : 'fn';
 }
 
-const WFS = 'https://terrabrasilis.dpi.inpe.br/geoserver/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=deter-amz:deter_amz&outputFormat=application%2Fjson&maxFeatures=200&bbox=-52.5,-7.5,-51,-6';
-const feats = (await (await fetch(WFS)).json()).features ?? [];
-const cands = feats
-  .filter((f) => f.properties.classname === 'DESMATAMENTO_CR' && f.properties.view_date >= '2026-05-01' && (f.properties.areamunkm ?? 0) >= 0.08)
-  .sort((a, b) => (b.properties.areamunkm ?? 0) - (a.properties.areamunkm ?? 0))
-  .slice(0, 5);
-console.log(`candidatos DETER desmate 2026: ${cands.length}`);
+const TH = Number(process.env.TH ?? -0.15);
+const MINPX = Number(process.env.MINPX ?? 50);
+const MAXN = Number(process.env.MAXN ?? 12);
+const OUT = process.env.OUT ?? `./validation/tuning_TH${TH}_PX${MINPX}.jsonl`;
+if (!process.env.APPEND) { try { unlinkSync(OUT); } catch {} }
+
+const LAYERS = [
+  { biome: 'amazonia', type: 'deter-amz:deter_amz', bbox: '-52.5,-7.5,-51,-6', max: 200 },
+  { biome: 'cerrado', type: 'deter-cerrado-nb:deter_cerrado', bbox: '-46,-12,-45,-11', max: 60 },
+];
+const all = [];
+for (const L of LAYERS) {
+  const url = `https://terrabrasilis.dpi.inpe.br/geoserver/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=${L.type}&outputFormat=application%2Fjson&maxFeatures=${L.max}&bbox=${L.bbox}`;
+  let feats = null;
+  for (let attempt = 1; attempt <= 4 && !feats; attempt++) {
+    try {
+      const r = await fetch(url);
+      const txt = await r.text();
+      feats = JSON.parse(txt).features ?? [];
+    } catch (e) {
+      console.log(`WFS ${L.biome} tentativa ${attempt} falhou; retry...`);
+      await new Promise((r) => setTimeout(r, 3000 * attempt));
+    }
+  }
+  if (!feats) {
+    console.log(`WFS ${L.biome} falhou após retries (servidor instável)`);
+    continue;
+  }
+  for (const f of feats) all.push({ ...f, _biome: L.biome });
+}
+// estratifica por bioma+mes: round-robin dos maiores por mes
+const groups = new Map();
+for (const f of all) {
+  const p = f.properties ?? {};
+  if (!String(p.classname ?? '').includes('DESMAT')) continue;
+  if ((p.view_date ?? '') < '2026-01-01') continue;
+  if ((p.areamunkm ?? 0) < 0.08) continue;
+  const k = `${f._biome}|${String(p.view_date).slice(0, 7)}`;
+  if (!groups.has(k)) groups.set(k, []);
+  groups.get(k).push(f);
+}
+for (const g of groups.values()) g.sort((a, b) => (b.properties.areamunkm ?? 0) - (a.properties.areamunkm ?? 0));
+const cands = [];
+const keys = [...groups.keys()].sort();
+let round = 0;
+while (cands.length < MAXN) {
+  let added = false;
+  for (const k of keys) {
+    const g = groups.get(k);
+    if (g.length > round) { cands.push(g[round]); added = true; }
+    if (cands.length >= MAXN) break;
+  }
+  if (!added) break;
+  round++;
+}
+console.log(`candidatos: ${cands.length} (${[...groups.keys()].length} estratos bioma/mes) TH=${TH} MINPX=${MINPX}`);
+if (process.env.LIST_ONLY) {
+  for (const c of cands) {
+    const p = c.properties;
+    const [lo, la] = centroid(c.geometry.coordinates[0][0]);
+    console.log(` ${c._biome} ${p.view_date} ${p.classname} ${Number(p.areamunkm).toFixed(3)}km2 @ ${la.toFixed(3)},${lo.toFixed(3)}`);
+  }
+  process.exit(0);
+}
 const res = { tp: 0, fn: 0, skip: 0 };
+const withTimeout = (p, ms, label) => Promise.race([
+  p, new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout ${label}`)), ms)),
+]);
 let i = 0;
 for (const c of cands) {
-  if (res.tp + res.fn >= 3) break;
-  if (process.env.ONLY_FIRST && (res.tp + res.fn) >= 1) break;
   i++;
+  const t0 = Date.now();
+  const row = { thr: TH, minpx: MINPX, biome: c._biome, date: c.properties.view_date, cls: c.properties.classname, area: c.properties.areamunkm };
   try {
-    res[await runSample(c, i)]++;
+    const r = await withTimeout(runSample(c, i, c._biome, row), 8 * 60_000, `amostra ${i}`);
+    row.outcome = r;
+    res[r]++;
   } catch (e) {
-    console.log(`  ERRO: ${e.message}`);
+    console.log(`  ERRO/timeout: ${e.message}`);
+    row.outcome = 'skip';
+    row.error = String(e.message).slice(0, 120);
     res.skip++;
   }
+  row.ms = Date.now() - t0;
+  appendFileSync(OUT, JSON.stringify(row) + '\n');
 }
 const { tp, fn } = res;
-const r = tp + fn === 0 ? 0 : tp / (tp + fn);
-console.log(`\nSMOKE n=${tp + fn} (skips=${res.skip}): TP=${tp} FN=${fn} recall=${r.toFixed(2)} (precision N/A: amostra só tem positivos)`);
-console.log('NOTA: smoke ilustrativo, NAO validacao (Fase 0 exige n>=30, 2 biomas, 2 estacoes).');
+console.log(`\nTH=${TH} PX=${MINPX} n=${tp + fn} (skips=${res.skip}): TP=${tp} FN=${fn} recall=${(tp + fn ? tp / (tp + fn) : 0).toFixed(2)} -> ${OUT}`);
