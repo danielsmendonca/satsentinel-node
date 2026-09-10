@@ -1,0 +1,12 @@
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-2.6,"lon":-60,"scene":"S2B_20MRC_20260713_0_L2A","valid":0.171,"count":12108,"score":0.353,"outcome":"fp","ms":15039}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-2.2,"lon":-59.5,"scene":"S2A_21MTT_20260717_0_L2A","valid":0.784,"count":18312,"score":0.494,"outcome":"fp","ms":12370}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-1.9,"lon":-61.5,"scene":"S2B_20MPC_20260713_0_L2A","valid":0.559,"count":37014,"score":0.465,"outcome":"fp","ms":10985}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-3.1,"lon":-60.2,"scene":"S2C_20MRB_20260718_0_L2A","valid":0.71,"count":12170,"score":0.494,"outcome":"fp","ms":13094}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-4.5,"lon":-58,"scene":"S2B_21MUR_20260720_0_L2A","valid":0.522,"count":5371,"score":0.475,"outcome":"fp","ms":16050}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-5.5,"lon":-57,"scene":"S2C_21MVQ_20260712_0_L2A","valid":0.69,"count":4889,"score":0.499,"outcome":"fp","ms":15078}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-1.5,"lon":-52.5,"scene":"S2A_22MCD_20260810_1_L2A","valid":0.521,"count":58486,"score":0.446,"outcome":"fp","ms":12719}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":0.5,"lon":-53,"scene":"S2A_22NBF_20260810_0_L2A","outcome":"skip","ms":1853}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-7.5,"lon":-58.5,"scene":"S2C_21MUM_20260715_0_L2A","valid":0.985,"count":145630,"score":0.521,"outcome":"fp","ms":12029}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-9,"lon":-56,"scene":"S2B_21LXL_20260714_0_L2A","valid":0.992,"count":134,"score":0.447,"outcome":"fp","ms":10636}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-3.5,"lon":-62,"scene":"S2C_20MPB_20260718_0_L2A","valid":0.749,"count":24275,"score":0.507,"outcome":"fp","ms":12755}
+{"thr":-0.15,"minpx":50,"biome":"controle","date":"2026-07-12","cls":"CONTROL","area":0,"lat":-6,"lon":-60.5,"scene":"S2A_20MQU_20260717_0_L2A","valid":0.935,"count":13450,"score":0.531,"outcome":"fp","ms":12722}

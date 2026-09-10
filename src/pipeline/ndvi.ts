@@ -7,6 +7,8 @@ import { isValidScl, validFrac, type EventClass } from './scl.js';
 export const EPS = 1e-6;
 export const DNDVI_THRESHOLD = -0.15;
 export const MIN_COMPONENT_PX = 50;
+/** Fracao minima de ceu limpo p/ votar (tuning DETER: 0.6 mantem TPs, mata 30% dos FPs de borda de nuvem). */
+export const MIN_VALID_FRAC = 0.6;
 
 export function ndvi(red: Float32Array, nir: Float32Array): Float32Array {
   const out = new Float32Array(red.length);

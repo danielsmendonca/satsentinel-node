@@ -52,21 +52,25 @@ async function stacSearch(body) {
   return (await r.json()).features ?? [];
 }
 
-async function runSample(alert, idx, biome, row) {
+async function runSample(alert, idx, biome, row, expectZero = false) {
   const ring = alert.geometry.coordinates[0][0];
   const [lon, lat] = centroid(ring);
   const refBox = bboxOf(alert.geometry.coordinates);
   console.log(`\n[${idx}] ${biome} DETER ${alert.properties.classname} ${alert.properties.view_date} ${alert.properties.areamunkm?.toFixed?.(3)}km2 @ ${lat.toFixed(3)},${lon.toFixed(3)}`);
-  // cena posterior mais próxima com pouco cloud
+  // cena posterior mais próxima com pouco cloud (STRICT_DAYS: só até N dias após o alerta)
+  const strictDays = Number(process.env.STRICT_DAYS ?? 0);
+  const endDt = strictDays > 0
+    ? new Date(new Date(alert.properties.view_date + 'T00:00:00Z').getTime() + strictDays * 864e5).toISOString()
+    : (process.env.SCENE_BEFORE ?? '2026-09-09T00:00:00Z');
   const after = await stacSearch({
     collections: ['sentinel-2-l2a'],
     intersects: { type: 'Point', coordinates: [lon, lat] },
-    datetime: `${alert.properties.view_date}T00:00:00Z/2026-09-09T00:00:00Z`,
+    datetime: `${alert.properties.view_date}T00:00:00Z/${endDt}`,
     query: { 'eo:cloud_cover': { lt: 30 } },
     sortby: [{ field: 'properties.datetime', direction: 'asc' }],
     limit: 5,
   });
-  if (!after.length) { console.log('  SKIP: sem cena posterior limpa'); return 'skip'; }
+  if (!after.length) { console.log(`  SKIP: sem cena limpa em +${strictDays || '∞'}d`); return 'skip'; }
   const t0 = after[0];
   const t0dt = t0.properties.datetime;
   console.log(`  t0: ${t0.id} ${t0dt.slice(0, 10)}`);
@@ -127,6 +131,12 @@ async function runSample(alert, idx, biome, row) {
     { dndviThreshold: TH, minPx: MINPX, ...(process.env.FOREST_GATE ? { requireForest: true, forest: forestMask(baseScls) } : {}) });
   console.log(`  valid=${(det.validFracT0 * 100).toFixed(0)}% px_anomalos=${det.count} score=${det.uncalibrated.toFixed(2)}`);
   row.valid = +det.validFracT0.toFixed(3); row.count = det.count; row.score = +det.uncalibrated.toFixed(3);
+  if (expectZero) {
+    // controle negativo (mata estavel): qualquer deteccao = falso-positivo
+    const o = det.count === 0 ? 'tn' : 'fp';
+    console.log(`  -> ${o.toUpperCase()} (controle)`);
+    return o;
+  }
   if (det.count === 0) { console.log('  -> FN (nada detectado)'); row.iou = 0; return 'fn'; }
   const mp = maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef,
     Number(process.env.MINPX ?? 50), Number(process.env.MINFILL ?? 0.25));
@@ -224,19 +234,17 @@ if (process.env.LIST_ONLY) {
   }
   process.exit(0);
 }
-const res = { tp: 0, fn: 0, skip: 0 };
+const res = { tp: 0, fn: 0, tn: 0, fp: 0, skip: 0 };
 const withTimeout = (p, ms, label) => Promise.race([
   p, new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout ${label}`)), ms)),
 ]);
-let i = 0;
-for (const c of cands.slice(OFFSET)) {
-  i++;
+async function runOne(c, i, biome, expectZero, vd) {
   const t0 = Date.now();
-  const row = { thr: TH, minpx: MINPX, biome: c._biome, date: c.properties.view_date, cls: c.properties.classname, area: c.properties.areamunkm };
+  const row = vd ?? { thr: TH, minpx: MINPX, biome: c._biome, date: c.properties.view_date, cls: c.properties.classname, area: c.properties.areamunkm };
   try {
-    const r = await withTimeout(runSample(c, i, c._biome, row), 8 * 60_000, `amostra ${i}`);
+    const r = await withTimeout(runSample(c, i, biome, row, expectZero), 8 * 60_000, `amostra ${i}`);
     row.outcome = r;
-    res[r]++;
+    res[r] = (res[r] ?? 0) + 1;
   } catch (e) {
     console.log(`  ERRO/timeout: ${e.message}`);
     row.outcome = 'skip';
@@ -246,5 +254,36 @@ for (const c of cands.slice(OFFSET)) {
   row.ms = Date.now() - t0;
   appendFileSync(OUT, JSON.stringify(row) + '\n');
 }
-const { tp, fn } = res;
-console.log(`\nTH=${TH} PX=${MINPX} n=${tp + fn} (skips=${res.skip}): TP=${tp} FN=${fn} recall=${(tp + fn ? tp / (tp + fn) : 0).toFixed(2)} -> ${OUT}`);
+// Controles negativos: mata estavel deve dar zero (TN). NEG="lat,lon;...".
+if (process.env.NEG) {
+  const pts = process.env.NEG.split(';').map((s) => s.split(',').map(Number))
+    .filter((p) => p.length === 2 && p.every(Number.isFinite));
+  console.log(`controles negativos: ${pts.length}`);
+  let i = 0;
+  const old = new Date(
+    (process.env.SCENE_BEFORE ? new Date(process.env.SCENE_BEFORE).getTime() : Date.now()) - 60 * 864e5,
+  ).toISOString().slice(0, 10);
+  for (const [la, lo] of pts) {
+    i++;
+    const d = 0.02;
+    const pseudo = {
+      _biome: 'controle',
+      geometry: { coordinates: [[[[lo - d, la - d], [lo + d, la - d], [lo + d, la + d], [lo - d, la + d], [lo - d, la - d]]]] },
+      properties: { view_date: old, classname: 'CONTROL', areamunkm: 0 },
+    };
+    await runOne(pseudo, i, 'controle', true,
+      { thr: TH, minpx: MINPX, biome: 'controle', date: old, cls: 'CONTROL', area: 0, lat: la, lon: lo });
+  }
+} else {
+  let i = 0;
+  for (const c of cands.slice(OFFSET)) {
+    i++;
+    await runOne(c, i, c._biome, false);
+  }
+}
+const { tp, fn, tn, fp } = res;
+const rec = tp + fn ? tp / (tp + fn) : 0;
+const prec = tp + fp ? tp / (tp + fp) : 0;
+const f1 = prec + rec ? (2 * prec * rec) / (prec + rec) : 0;
+console.log(`\nTH=${TH} PX=${MINPX}: TP=${tp} FN=${fn} TN=${tn} FP=${fp} skips=${res.skip} -> ${OUT}`);
+console.log(`recall=${rec.toFixed(2)} precision=${prec.toFixed(2)} F1=${f1.toFixed(2)}`);

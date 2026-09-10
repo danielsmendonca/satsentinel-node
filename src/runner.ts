@@ -13,7 +13,7 @@ import { hexToBytes, bytesToHex } from '@noble/hashes/utils';
 import { ed25519 } from '@noble/curves/ed25519';
 import { signPayload } from '@satsentinel/protocol';
 import { loadOrCreate } from './identity/operator.js';
-import { detectWindow, ndvi } from './pipeline/ndvi.js';
+import { detectWindow, ndvi, MIN_VALID_FRAC } from './pipeline/ndvi.js';
 import { maskToMultiPolygon } from './pipeline/vectorize.js';
 import { parseMgrsTile, utmFromMgrs } from './fetcher/mgrs.js';
 import { forestMask } from './pipeline/scl.js';
@@ -142,7 +142,7 @@ async function processReal(
   const forest = eventClass === 'DEFORESTATION' ? forestMask(baseScls) : undefined;
   const det = detectWindow(red, nir, scl, baseNdvis, eventClass,
     forest ? { requireForest: true, forest } : {});
-  if (det.validFracT0 < 0.3) throw new Error(`valid_frac=${det.validFracT0.toFixed(2)} abaixo de 0.3 (nuvem)`);
+  if (det.validFracT0 < MIN_VALID_FRAC) throw new Error(`valid_frac=${det.validFracT0.toFixed(2)} abaixo de ${MIN_VALID_FRAC} (nuvem/haze)`);
   const geometry = det.count > 0
     ? maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef, 50, 0.25)
     : null;
