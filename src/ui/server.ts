@@ -1,7 +1,7 @@
 /** Central de comando local :3000 — HUD, adotar, quadrantes, tarefas realtime + auto-run. */
 import Fastify from 'fastify';
-import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, writeFileSync, readdirSync, statSync, renameSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { loadOrCreate, exportPairing, importPairing, configPath } from '../identity/operator.js';
 import { runOnceDetailed, getSession, type RunDetail } from '../runner.js';
 
@@ -19,13 +19,25 @@ let lastRun: { at: string; summary: string } | null = null;
 let autoTimer: NodeJS.Timeout | null = null;
 let autoNextAt: string | null = null;
 
+// Config em memoria (evita I/O por request) + escrita atomica (tmp+rename:
+// crash no meio da escrita nunca corrompe node.config.json).
+let cfgCache: { dir: string; data: Record<string, unknown> } | null = null;
+export function dropCfgCache(dir?: string): void {
+  if (!dir || cfgCache?.dir === dir) cfgCache = null;
+}
 function readCfg(dir: string) {
-  return JSON.parse(readFileSync(configPath(dir), 'utf8')) as Record<string, unknown>;
+  if (cfgCache?.dir === dir) return cfgCache.data as Record<string, unknown>;
+  const data = JSON.parse(readFileSync(configPath(dir), 'utf8')) as Record<string, unknown>;
+  cfgCache = { dir, data };
+  return data;
 }
 function writeCfg(dir: string, patch: Record<string, unknown>) {
   const cp = configPath(dir);
-  const full = JSON.parse(readFileSync(cp, 'utf8')) as Record<string, unknown>;
-  writeFileSync(cp, JSON.stringify({ ...full, ...patch }, null, 2));
+  const full = { ...(cfgCache?.dir === dir ? cfgCache.data : JSON.parse(readFileSync(cp, 'utf8'))), ...patch };
+  const tmp = `${cp}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(full, null, 2));
+  renameSync(tmp, cp);
+  cfgCache = { dir, data: full as Record<string, unknown> };
 }
 
 function isValidPolygon(p: unknown): boolean {
@@ -199,6 +211,14 @@ function applyAuto(configDir: string): void {
   }, minutes * 60e3);
 }
 
+/** Caminho da thumb contido em <configDir>/thumbs (null = rejeita). Puro e testavel. */
+export function resolveThumbFile(configDir: string, h: string, task: string, kind: string): string | null {
+  if (!/^[0-9a-f]{15}$/.test(h) || !/^[0-9a-f-]{8,36}$/.test(task) || (kind !== 't0' && kind !== 'base')) return null;
+  const fp = resolve(configDir, 'thumbs', `${h}_${task}_${kind}.png`);
+  if (!fp.startsWith(resolve(configDir, 'thumbs') + sep)) return null;
+  return fp;
+}
+
 export async function buildLocalUi(configDir = 'config') {
   const { key: bootKey } = loadOrCreate(configDir);
   applyAuto(configDir);
@@ -257,11 +277,6 @@ export async function buildLocalUi(configDir = 'config') {
   // F1 visual: thumbs NDVI geradas no voto (cache local, nunca no protocolo).
   // GET /api/thumbs?h=<h3> -> [{task, t0, base, mtime}] (ate 6 tasks recentes)
   // GET /api/thumb?h=<h3>&task=<uuid>&kind=t0|base -> image/png
-  const thumbFile = (dir: string, h: string, task: string, kind: string): string | null => {
-    if (!/^[0-9a-f]{15}$/.test(h) || !/^[0-9a-f-]{8,36}$/.test(task) || (kind !== 't0' && kind !== 'base')) return null;
-    if (task.includes('..') || h.includes('..')) return null;
-    return join(dir, 'thumbs', `${h}_${task}_${kind}.png`);
-  };
   app.get('/api/thumbs', async (req, reply) => {
     const q = req.query as Record<string, string>;
     if (!q.h || !/^[0-9a-f]{15}$/.test(q.h)) return reply.code(400).send({ error: 'h invalido' });
@@ -283,7 +298,7 @@ export async function buildLocalUi(configDir = 'config') {
   });
   app.get('/api/thumb', async (req, reply) => {
     const q = req.query as Record<string, string>;
-    const fp = thumbFile(configDir, q.h ?? '', q.task ?? '', q.kind ?? '');
+    const fp = resolveThumbFile(configDir, q.h ?? '', q.task ?? '', q.kind ?? '');
     if (!fp) return reply.code(400).send({ error: 'parametros invalidos' });
     let buf: Buffer;
     try { buf = readFileSync(fp); } catch { return reply.code(404).send({ error: 'thumb nao encontrada' }); }
@@ -402,6 +417,7 @@ export async function buildLocalUi(configDir = 'config') {
   app.post('/pairing/import', async (req, reply) => {
     try {
       const key = importPairing(JSON.stringify(req.body), configDir);
+      dropCfgCache(configDir); // chave nova -> operator_id da config muda
       return { ok: true, operator_id: key.operator_id };
     } catch (e) {
       return reply.code(400).send({ error: String(e) });
@@ -454,6 +470,18 @@ body{background:#020617;font-family:ui-sans-serif,system-ui,sans-serif}
 .leaflet-popup-tip{background:#0f172a}
 section{display:none}section.on{display:block}
 .row{display:flex;gap:.5rem;align-items:center;background:rgba(15,23,42,.6);border:1px solid #1e293b;border-radius:.75rem;padding:.55rem .7rem;margin:.4rem 0;font-size:13px}
+.baswap img.top{transition:opacity .25s}
+.baswap:hover img.top,.baswap:focus-within img.top,.baswap.off img.top{opacity:0}
+button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid #00f2fe;outline-offset:2px}
+button,.act,.danger{min-height:44px;min-width:44px}
+#toasts{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:2000;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
+.toast{background:rgba(2,6,23,.92);border:1px solid #1e293b;color:#e2e8f0;font-size:13px;padding:8px 14px;border-radius:99px;box-shadow:0 4px 18px rgba(0,0,0,.5);animation:tin .2s ease}
+.toast.ok{border-color:#10b981;color:#a7f3d0}.toast.err{border-color:#f43f5e;color:#fecdd3}.toast.warn{border-color:#facc15;color:#fef08a}
+@keyframes tin{from{opacity:0;transform:translateY(8px)}}
+.btn-busy{opacity:.6;pointer-events:none}
+.btn-busy::after{content:' ◌';display:inline-block;animation:sp 1s linear infinite}
+#modal-veil{position:fixed;inset:0;z-index:1900;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center}
+#modal-box{background:#0f172a;border:1px solid #334155;border-radius:12px;padding:18px;max-width:min(420px,90vw)}
 .row code{font-size:12px;color:#00f2fe}
 .row .grow{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hint{font-size:12px;color:#64748b}
@@ -523,7 +551,7 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 </section>
 <section id="v-tasks" style="display:none">
 <div class="flex items-center gap-2 text-sm bg-slate-900/60 border border-slate-800 rounded-xl p-2.5 mb-2"><span class="flex-1">Automático <span class="text-slate-500 text-xs">(vigia + vota sozinho)</span></span>
-<select id="auto-min" class="bg-slate-800 border border-slate-700 rounded-lg p-1.5 text-sm"><option value="15">15m</option><option value="30" selected>30m</option><option value="60">60m</option><option value="120">120m</option></select>
+<select id="auto-min" aria-label="Intervalo do modo automático" class="bg-slate-800 border border-slate-700 rounded-lg p-1.5 text-sm"><option value="15">15m</option><option value="30" selected>30m</option><option value="60">60m</option><option value="120">120m</option></select>
 <button id="auto-t" class="text-sm px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 btn-glow">Ligar</button></div>
 <div id="auto-info" class="text-xs text-slate-500 mb-2"></div>
 <button id="run2" class="go btn-go w-full bg-emerald-950 text-emerald-300 border border-emerald-400 rounded-xl p-3 font-semibold">▶ EXECUTAR AGORA</button>
@@ -537,12 +565,13 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 </section>
 <section id="v-config" style="display:none">
 <div class="text-xs text-slate-500 mb-1">OPERADOR</div><div id="cfg-op" class="font-mono text-sm text-cyan-300 mb-3"></div>
-<div class="text-xs text-slate-500 mb-1">APELIDO DO NÓ</div>
+<label for="cfg-alias" class="text-xs text-slate-500 mb-1 block">APELIDO DO NÓ</label>
 <div class="flex gap-2 mb-3"><input id="cfg-alias" maxlength="40" class="flex-1 bg-slate-800 border border-slate-700 rounded-lg p-2 text-sm"><button id="cfg-save-alias" class="text-sm px-3 rounded-lg bg-slate-800 border border-slate-700 btn-glow">OK</button></div>
-<div class="text-xs text-slate-500 mb-1">SERVIDOR</div>
+<label for="cfg-server" class="text-xs text-slate-500 mb-1 block">SERVIDOR</label>
 <div class="flex gap-2 mb-3"><input id="cfg-server" maxlength="200" class="flex-1 bg-slate-800 border border-slate-700 rounded-lg p-2 text-sm font-mono"><button id="cfg-save-server" class="text-sm px-3 rounded-lg bg-slate-800 border border-slate-700 btn-glow">OK</button></div>
 <div class="text-xs text-slate-500 mb-1">EMPARELHAMENTO</div>
 <div class="flex gap-2 mb-2"><a href="/pairing/export" download="operator.key" class="text-sm px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 btn-glow"><i data-lucide="download" class="w-4 h-4 inline"></i> Exportar chave</a></div>
+<label for="cfg-import" class="text-xs text-slate-500 mb-1 block">IMPORTAR CHAVE</label>
 <textarea id="cfg-import" rows="3" placeholder="Cole o operator.key aqui para importar" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-xs font-mono mb-2"></textarea>
 <button id="cfg-do-import" class="text-sm px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 btn-glow mb-3"><i data-lucide="upload" class="w-4 h-4 inline"></i> Importar</button>
 <div class="text-xs text-slate-500 mb-1">ZONA DE PERIGO</div>
@@ -550,9 +579,15 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 <div id="cfg-msg" class="text-xs text-slate-500 mt-2"></div>
 </section>
 </aside>
+<div id="toasts" aria-live="polite" aria-atomic="false"></div>
+<div id="modal-veil" style="display:none" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div id="modal-box">
+<div id="modal-title" class="font-semibold mb-1"></div><div id="modal-body" class="text-sm text-slate-400 mb-4"></div>
+<div class="flex gap-2 justify-end"><button id="modal-no" class="text-sm px-4 py-2 rounded-lg bg-slate-800 border border-slate-700">Cancelar</button>
+<button id="modal-yes" class="text-sm px-4 py-2 rounded-lg border border-rose-500/60 text-rose-200">Confirmar</button></div>
+</div></div>
 <div id="console" class="absolute left-2 right-2 md:right-auto md:w-[430px] bottom-2 z-[1100] rounded-xl bg-slate-950/90 backdrop-blur-md border border-slate-800/80">
 <div class="flex items-center gap-2 px-3 pt-2 text-xs text-slate-400"><span class="text-cyan-300">◉ CONSOLE</span>
-<span id="msg" class="flex-1 truncate"></span>
+<span id="msg" class="flex-1 truncate" role="status" aria-live="polite"></span>
 <button id="console-toggle" class="p-1 text-slate-500 hover:text-cyan-300"><i data-lucide="chevron-down" class="w-4 h-4"></i></button></div>
 <div id="console-body" class="px-3 pb-3">
 <div class="flex gap-2 mt-2"><button id="geo" class="flex-1 text-sm px-3 py-2.5 rounded-xl bg-slate-800 border border-slate-700 btn-glow">📍 GPS</button>
@@ -631,7 +666,7 @@ function liveLegend(){
 }
 function livePopup(layer,c){
   const v=Number(c.value);
-  return (layer==='NDVI'?'🌿 NDVI '+v.toFixed(2):'🌡 '+v.toFixed(1)+' °C')+'<br>'+c.h3_index+'<br>'+c.votes+' voto(s)';
+  return (layer==='NDVI'?'🌿 NDVI '+v.toFixed(2):'🌡 '+v.toFixed(1)+' °C')+'<br>'+esc(c.h3_index)+'<br>'+esc(c.votes)+' voto(s)';
 }
 async function loadLive(){
   if(!liveName)return;
@@ -679,17 +714,68 @@ function paintLogSrc(){
   const off='flex-1 text-sm px-3 py-2 rounded-lg border btn-glow bg-slate-800 border-slate-700 text-slate-400';
   a.className=logSrc==='node'?on:off;b.className=logSrc==='server'?on:off;}
 function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+// Toasts nao-bloqueantes (substituem alert/confirm nativos).
+function toast(msg,kind){
+  const box=$('toasts');if(!box)return;
+  const d=document.createElement('div');
+  d.className='toast '+(kind||'');
+  d.textContent=String(msg).slice(0,220);
+  box.appendChild(d);
+  while(box.children.length>4)box.removeChild(box.firstChild);
+  setTimeout(()=>{d.style.opacity='0';d.style.transition='opacity .3s';setTimeout(()=>d.remove(),320);},3600);
+}
+// busy(btn,fn): desabilita + spinner durante fetch; reabilita sempre.
+async function busy(btn,fn){
+  const b=(typeof btn==='string')?$(btn):btn;
+  if(b){b.disabled=true;b.classList.add('btn-busy');}
+  try{return await fn();}finally{if(b){b.disabled=false;b.classList.remove('btn-busy');}}
+}
+// Modal de confirmacao (substitui confirm() bloqueante). Foco no cancelar.
+function confirmModal(title,body){
+  return new Promise(res=>{
+    const veil=$('modal-veil');
+    $('modal-title').textContent=title;$('modal-body').textContent=body;
+    const prev=document.activeElement;
+    const done=v=>{veil.style.display='none';
+      $('modal-yes').onclick=$('modal-no').onclick=null;
+      document.removeEventListener('keydown',onKey,true);
+      if(prev&&prev.focus)prev.focus();res(v);};
+    const onKey=e=>{if(e.key==='Escape'){e.stopPropagation();done(false);}};
+    $('modal-yes').onclick=()=>done(true);
+    $('modal-no').onclick=()=>done(false);
+    document.addEventListener('keydown',onKey,true);
+    veil.style.display='flex';
+    $('modal-no').focus();
+  });
+}
 function lineHtml(e){
   if(e.method){const c=e.status>=500?'log-err':e.status>=400?'log-warn':'log-ok';
     return '<div><span class="log-dim">'+esc(String(e.t).slice(11,19))+'</span> <span class="'+c+'">'+esc(e.method)+' '+esc(e.url)+' → '+e.status+'</span></div>';}
   const c=e.level==='err'?'log-err':e.level==='warn'?'log-warn':e.level==='ok'?'log-ok':'';
   return '<div><span class="log-dim">'+esc(String(e.t).slice(11,19))+'</span> <span class="'+c+'">'+esc(e.msg)+'</span></div>';}
+let logLastKey=null,logSeenSrc='';
+const logKey=e=>[e.t,e.method||e.level,e.url||e.msg,e.status].join('|');
 async function loadLogs(force){
   try{
     const j=await (await fetch('/api/logs?src='+logSrc+'&n=80')).json();
     const el=$('logbox');if(!el)return;
-    el.innerHTML=((j.data||[]).map(lineHtml).join(''))||'<div class="log-dim">sem logs</div>';
-    el.scrollTop=el.scrollHeight;
+    const lines=j.data||[];
+    // Append incremental por identidade (anel gira: slice(-80) desliza).
+    let fresh=lines;
+    if(!force&&logSrc===logSeenSrc&&logLastKey!=null){
+      const idx=lines.map(logKey).lastIndexOf(logLastKey);
+      fresh=(idx>=0)?lines.slice(idx+1):lines;
+      if(idx<0)el.innerHTML='';
+    }else{el.innerHTML='';}
+    logSeenSrc=logSrc;
+    if(lines.length)logLastKey=logKey(lines[lines.length-1]);
+    const atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<30;
+    const frag=document.createDocumentFragment();
+    for(const e of fresh){const d=document.createElement('div');d.innerHTML=lineHtml(e);while(d.firstChild)frag.appendChild(d.firstChild);}
+    el.appendChild(frag);
+    while(el.children.length>200)el.removeChild(el.firstChild);
+    if(atBottom)el.scrollTop=el.scrollHeight;
+    if(!el.children.length)el.innerHTML='<div class="log-dim">sem logs</div>';
   }catch(e){}
 }
 $('log-node').onclick=()=>{logSrc='node';paintLogSrc();loadLogs();};
@@ -703,26 +789,31 @@ async function renderConfig(){
     if(document.activeElement!==$('cfg-server'))$('cfg-server').value=d.server_url||'';
   }catch(e){}
 }
-$('cfg-save-alias').onclick=async()=>{await fetch('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({node_alias:$('cfg-alias').value})});$('cfg-msg').textContent='Salvo.';refresh();};
-$('cfg-save-server').onclick=async()=>{const r=await fetch('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({server_url:$('cfg-server').value})});$('cfg-msg').textContent=r.ok?'Salvo.':'URL inválida.';refresh();};
-$('cfg-do-import').onclick=async()=>{try{const v=JSON.parse($('cfg-import').value);
+$('cfg-save-alias').onclick=()=>busy('cfg-save-alias',async()=>{await fetch('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({node_alias:$('cfg-alias').value})});toast('Apelido salvo.','ok');refresh();});
+$('cfg-save-server').onclick=()=>busy('cfg-save-server',async()=>{const r=await fetch('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({server_url:$('cfg-server').value})});toast(r.ok?'Servidor salvo.':'URL inválida.',r.ok?'ok':'err');refresh();});
+$('cfg-do-import').onclick=()=>busy('cfg-do-import',async()=>{try{const v=JSON.parse($('cfg-import').value);
     const r=await fetch('/api/pairing/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(v)});
-    $('cfg-msg').textContent=r.ok?'Chave importada. Recarregue a página.':'Falha na importação.';}
-  catch(e){$('cfg-msg').textContent='JSON inválido.';}};
-$('cfg-clear').onclick=async()=>{if(!confirm('Abandonar TODOS os quadrantes?'))return;
-  adopted.clear();await save();paintMine();renderList();refresh();$('cfg-msg').textContent='Todos abandonados.';};
+    toast(r.ok?'Chave importada. Recarregue a página.':'Falha na importação.',r.ok?'ok':'err');}
+  catch(e){toast('JSON inválido.','err');}});
+$('cfg-clear').onclick=async()=>{if(!await confirmModal('Abandonar tudo?','Todos os quadrantes adotados serão removidos deste nó.'))return;
+  adopted.clear();await save();paintMine();renderList();refresh();toast('Todos abandonados.','warn');};
 const hhmm=iso=>{try{return new Date(iso).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});}catch(e){return '?';}};
+let actSig='';
 async function loadActivity(){
   try{
     const j=await (await fetch('/api/activity')).json();
+    const evs=(j.data?.events||[]).slice(0,3),vts=(j.data?.votes||[]).slice(0,8);
+    const sig=JSON.stringify([evs.map(e=>[e.created_at,e.lifecycle_state,e.calibrated_confidence]),vts.map(v=>[v.created_at,v.operator_id,v.model_score])]);
+    if(sig===actSig)return; // sem mudanca: nao toca no DOM
+    actSig=sig;
     const el=document.getElementById('feed');
     if(!el)return;
     let html='';
     for(const e of (j.data?.events||[]).slice(0,3)){
-      html+='<div class="row"><span class="grow">🔴 '+hhmm(e.created_at)+' · '+(e.lifecycle_state||'')+' '+(e.event_class||'')+' · conf '+Number(e.calibrated_confidence||0).toFixed(2)+'</span></div>';
+      html+='<div class="row"><span class="grow">🔴 '+hhmm(e.created_at)+' · '+esc(e.lifecycle_state||'')+' '+esc(e.event_class||'')+' · conf '+Number(e.calibrated_confidence||0).toFixed(2)+'</span></div>';
     }
     for(const v of (j.data?.votes||[]).slice(0,8)){
-      html+='<div class="row"><span class="grow">🛰 '+hhmm(v.created_at)+' · @'+String(v.operator_id||'').slice(0,8)+' · ▦ '+String(v.h3_index||'').slice(0,12)+' · score '+Number(v.model_score||0).toFixed(2)+'<br><small style="color:var(--dim)">'+String(v.observation_id||'').slice(0,26)+'</small></span></div>';
+      html+='<div class="row"><span class="grow">🛰 '+hhmm(v.created_at)+' · @'+esc(String(v.operator_id||'').slice(0,8))+' · ▦ '+esc(String(v.h3_index||'').slice(0,12))+' · score '+Number(v.model_score||0).toFixed(2)+'<br><small style="color:var(--dim)">'+esc(String(v.observation_id||'').slice(0,26))+'</small></span></div>';
     }
     el.innerHTML=html||'<div class="hint">Sem atividade ainda — execute uma rodada.</div>';
   }catch(e){}
@@ -734,24 +825,29 @@ async function refresh(){
   const opEl=document.getElementById('op');if(opEl)opEl.textContent='@'+(j.operator||'?');
   const opSide=$('op-side');if(opSide)opSide.textContent='@'+(j.operator||'?');
   await ensurePolys();
-  const on=j.server_online;
-  $('h-server').innerHTML=on
-    ?'<span class="inline-flex items-center gap-1.5 text-emerald-400 font-semibold text-sm"><span class="dot on"></span>ONLINE</span>'
-    :'<span class="inline-flex items-center gap-1.5 text-rose-400 font-semibold text-sm"><span class="dot off"></span>OFF</span>';
+  // HUD por assinatura: so toca no DOM quando algum numero muda (fim do pisca).
   const st=j.stats||{};
-  $('h-nodes').textContent=st.nodes_on??'…';
-  const myOn=st.my_nodes_on??0, myTot=st.my_nodes_total??0;
-  $('h-mynodes').innerHTML=myOn+' <small class="text-slate-500 font-normal">Ativos</small>';
-  $('h-mynodes').title=myTot+' registrado(s)';
-  const ad=adopted.size, mp=st.celulas_mapeadas??0;
-  $('h-cells').textContent=ad+' / '+mp;
-  $('h-cellbar').style.width=Math.min(100,Math.round(ad/Math.max(mp,1)*100))+'%';
-  const evs=st.eventos_confirmados??0;
-  $('h-events').innerHTML=evs>0
-    ?'<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/60 text-rose-300 text-xs font-bold">'+evs+' Detectado'+(evs>1?'s':'')+'</span>'
-    :'<span class="text-slate-500 text-sm">Nenhum</span>';
-  $('auto-t').textContent=j.auto?.enabled?'Desligar':'Ligar';
-  $('auto-info').textContent=j.auto?.enabled?('Auto ligado · próxima ~ '+j.auto.next_at):'Auto desligado.';
+  const hudSig=JSON.stringify([j.server_online,st.nodes_on,st.my_nodes_on,st.my_nodes_total,adopted.size,st.celulas_mapeadas,st.eventos_confirmados,!!j.auto?.enabled,j.auto?.next_at]);
+  if(hudSig!==lastHud){
+    lastHud=hudSig;
+    const on=j.server_online;
+    $('h-server').innerHTML=on
+      ?'<span class="inline-flex items-center gap-1.5 text-emerald-400 font-semibold text-sm"><span class="dot on"></span>ONLINE</span>'
+      :'<span class="inline-flex items-center gap-1.5 text-rose-400 font-semibold text-sm"><span class="dot off"></span>OFF</span>';
+    $('h-nodes').textContent=st.nodes_on??'…';
+    const myOn=st.my_nodes_on??0, myTot=st.my_nodes_total??0;
+    $('h-mynodes').innerHTML=myOn+' <small class="text-slate-500 font-normal">Ativos</small>';
+    $('h-mynodes').title=myTot+' registrado(s)';
+    const ad=adopted.size, mp=st.celulas_mapeadas??0;
+    $('h-cells').textContent=ad+' / '+mp;
+    $('h-cellbar').style.width=Math.min(100,Math.round(ad/Math.max(mp,1)*100))+'%';
+    const evs=st.eventos_confirmados??0;
+    $('h-events').innerHTML=evs>0
+      ?'<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/60 text-rose-300 text-xs font-bold">'+evs+' Detectado'+(evs>1?'s':'')+'</span>'
+      :'<span class="text-slate-500 text-sm">Nenhum</span>';
+    $('auto-t').textContent=j.auto?.enabled?'Desligar':'Ligar';
+    $('auto-info').textContent=j.auto?.enabled?('Auto ligado · próxima ~ '+j.auto.next_at):'Auto desligado.';
+  }
   paintMine();
   const sig=[...adopted].sort().join();
   if(sig!==lastSig){lastSig=sig;renderList();}
@@ -760,6 +856,7 @@ async function refresh(){
   return j;
 }
 let lastSig='';
+let lastHud='';
 setInterval(async()=>{if(document.hidden||runStateRunning)return;try{await refresh();}catch(e){}},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh().catch(()=>{});});
 function paintMine(){
@@ -771,7 +868,9 @@ function paintMine(){
     const ll=boundsCache.get(h);
     if(!ll)continue;
     const poly=L.polygon(ll,{color:'#22ff88',weight:2,fillColor:'#22ff88',fillOpacity:0.4}).addTo(map);
-    poly.bindPopup('<code>'+h+'</code><br><button onclick="unadopt(\\''+h+'\\')">Abandonar</button>');
+    poly.bindPopup('<code>'+esc(h)+'</code><br><button data-unadopt="'+esc(h)+'">Abandonar</button>');
+    poly.on('popupopen',ev=>{ev.popup.getElement()?.querySelector('[data-unadopt]')?.addEventListener('click',async e=>{
+      const hh=e.target.dataset.unadopt;adopted.delete(hh);await save();paintMine();renderList();refresh();});});
     poly.on('click',ev=>{if(view==='cells'){L.DomEvent.stopPropagation(ev);tap(h);}});
     layers.set(h,{poly,mine:true});
   }
@@ -789,7 +888,7 @@ async function ensurePolys(){
     }
   }catch(e){}
 }
-window.unadopt=async h=>{adopted.delete(h);await save();paintMine();renderList();refresh();};
+async function unadoptMine(h){adopted.delete(h);await save();paintMine();renderList();refresh();}
 let evLayer=null, wasRunning=false;
 async function loadEvents(){
   try{
@@ -800,7 +899,7 @@ async function loadEvents(){
       try{const un=e.lifecycle_state==='UNCONFIRMED';
         const col=un?'#94a3b8':'#ff5470';
         L.geoJSON(e.geometry,{style:{color:col,weight:2,dashArray:un?'5 4':null,fillColor:col,fillOpacity:un?0.12:0.3}})
-        .bindPopup((un?'<b>⚠ NÃO CONFIRMADO</b> (1 voto)<br>':'<b>'+e.lifecycle_state+'</b> ')+(e.event_class||'')+'<br>conf '+(Number(e.calibrated_confidence||0)).toFixed(2)+'<br><code>'+String(e.id).slice(0,8)+'</code>')
+        .bindPopup((un?'<b>⚠ NÃO CONFIRMADO</b> (1 voto)<br>':'<b>'+esc(e.lifecycle_state)+'</b> ')+esc(e.event_class||'')+'<br>conf '+(Number(e.calibrated_confidence||0)).toFixed(2)+'<br><code>'+esc(String(e.id).slice(0,8))+'</code>')
         .addTo(evLayer);}catch(_){}
     }
     evLayer.addTo(map);
@@ -893,7 +992,7 @@ document.getElementById('geo').onclick=()=>{navigator.geolocation?.getCurrentPos
 function renderList(){
   const el=$('list');
   if(adopted.size===0){el.innerHTML='<div class="hint">Nenhum adotado. Vá em ➕ Adotar.</div>';return;}
-  el.innerHTML=[...adopted].map(h=>'<div class="row"><span class="grow"><code>'+h+'</code></span>'+
+  el.innerHTML=[...adopted].map(h=>'<div class="row"><span class="grow"><code>'+esc(h)+'</code></span>'+
     '<button class="act" data-hist="'+h+'">📜</button>'+
     (centers[h]?'<button class="act" data-go="'+h+'">📍 ver</button>':'<span class="pill">sem posição</span>')+
     '<button class="danger" data-un="'+h+'">Abandonar</button></div>').join('');
@@ -913,31 +1012,32 @@ async function showHist(h){
     if(!d.tasks.length)html+='<div class="hint">Sem tasks neste quadrante ainda.</div>';
     for(const t of d.tasks){
       const obs=String(t.observation_id||'');const base=String(t.baseline_scene||'');
-      html+='<div class="row"><span class="grow">📡 '+obs.slice(4,22)+' → base '+base.slice(4,22)+
-        '<br><small style="color:var(--dim)">'+t.event_class+' · '+t.status+' '+t.completed_count+'/'+t.redundancy_required+' votos · '+hhmm(t.created_at)+'</small></span></div>';
+      html+='<div class="row"><span class="grow">📡 '+esc(obs.slice(4,22))+' → base '+esc(base.slice(4,22))+
+        '<br><small style="color:var(--dim)">'+esc(t.event_class)+' · '+esc(t.status)+' '+Number(t.completed_count||0)+'/'+Number(t.redundancy_required||0)+' votos · '+hhmm(t.created_at)+'</small></span></div>';
       for(const v of d.votes.filter(x=>x.task_id===t.id)){
-        html+='<div class="row"><span class="grow" style="padding-left:14px">🗳 @'+String(v.operator_id).slice(0,8)+
+        html+='<div class="row"><span class="grow" style="padding-left:14px">🗳 @'+esc(String(v.operator_id).slice(0,8))+
           ' · score '+Number(v.model_score).toFixed(2)+' · céu '+Math.round((v.valid_frac||0)*100)+'% · '+hhmm(v.created_at)+'</span></div>';
       }
     }
     for(const e of d.events){
-      html+='<div class="row"><span class="grow">🔴 '+(e.lifecycle_state||'')+' '+(e.event_class||'')+
+      html+='<div class="row"><span class="grow">🔴 '+esc(e.lifecycle_state||'')+' '+esc(e.event_class||'')+
         ' · conf '+Number(e.calibrated_confidence||0).toFixed(2)+' · IoU '+Number(e.spatial_agreement_iou||0).toFixed(2)+
         ' · '+hhmm(e.created_at)+'</span></div>';
     }
     // F1 visual: pares antes x depois votados por este no (thumbs NDVI locais).
+    let pairs=[];
     try{
       const tj=await (await fetch('/api/thumbs?h='+encodeURIComponent(h))).json();
-      const pairs=(tj.data||[]).filter(x=>x.t0&&x.base);
+      pairs=(tj.data||[]).filter(x=>x.t0&&x.base);
       if(pairs.length){
         html+='<div class="row"><span class="grow"><b>🛰 ANTES × DEPOIS</b><br><small style="color:var(--dim)">verde=mata · vermelho=corte · passe o mouse para ver o antes</small></span></div>';
         for(const p of pairs.slice(0,3)){
-          html+='<div class="row"><span class="grow"><small style="color:var(--dim)">voto '+String(p.task).slice(0,8)+'</small>'+
-            '<div style="position:relative;line-height:0;border-radius:8px;overflow:hidden;border:1px solid #1e293b">'+
-            '<img loading="lazy" src="'+p.base+'" style="width:100%;display:block" alt="antes">'+
-            '<img loading="lazy" src="'+p.t0+'" style="position:absolute;inset:0;width:100%;height:100%;transition:opacity .25s" onmouseover="this.style.opacity=0" onmouseout="this.style.opacity=1" alt="agora">'+
+          html+='<div class="row"><span class="grow"><small style="color:var(--dim)">voto '+esc(String(p.task).slice(0,8))+'</small>'+
+            '<button class="baswap" aria-pressed="false" aria-label="Alternar antes e depois" style="position:relative;display:block;width:100%;line-height:0;border-radius:8px;overflow:hidden;border:1px solid #1e293b;background:none;padding:0;cursor:pointer">'+
+            '<img loading="lazy" src="'+esc(p.base)+'" style="width:100%;display:block" alt="antes">'+
+            '<img loading="lazy" src="'+esc(p.t0)+'" class="top" style="position:absolute;inset:0;width:100%;height:100%" alt="agora">'+
             '<span style="position:absolute;top:4px;left:4px;font-size:10px;background:rgba(2,6,23,.75);color:#00f2fe;padding:1px 6px;border-radius:99px">AGORA</span>'+
-            '</div></span></div>';
+            '</button></span></div>';
         }
         // F2: fita temporal — cada passagem com nota do voto (clique amplia).
         const strip=[...pairs].reverse();
@@ -948,56 +1048,79 @@ async function showHist(h){
           const sc=(v.model_score!=null)?Number(v.model_score).toFixed(2):'?';
           const when=new Date(p.mtime||Date.now()).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});
           const dot=Number(v.model_score||0)>=0.1?'🔴':'⚪';
-          html+='<a href="'+p.t0+'" target="_blank" rel="noopener" style="flex:0 0 auto;width:104px;text-decoration:none">'+
-            '<img loading="lazy" src="'+p.t0+'" style="width:104px;height:104px;object-fit:cover;border-radius:8px;border:1px solid #1e293b" alt="passagem">'+
+          html+='<a href="'+esc(p.t0)+'" target="_blank" rel="noopener" style="flex:0 0 auto;width:104px;text-decoration:none">'+
+            '<img loading="lazy" src="'+esc(p.t0)+'" style="width:104px;height:104px;object-fit:cover;border-radius:8px;border:1px solid #1e293b" alt="passagem">'+
             '<div style="font-size:10px;color:var(--dim);text-align:center">'+dot+' '+when+' · '+sc+'</div></a>';
         }
         html+='</div></div>';
       }
     }catch(e2){/* sem thumbs: timeline segue */}
+    if(!pairs.length)html+='<div class="hint">Sem fotos locais ainda — vote neste quadrante para gerar o antes × depois.</div>';
     el.innerHTML=html;
+    el.querySelectorAll('.baswap').forEach(b=>b.addEventListener('click',()=>{
+      const off=b.classList.toggle('off');b.setAttribute('aria-pressed',off?'true':'false');}));
     $('hist-back').onclick=()=>{el.innerHTML='';};
     icons();
   }catch(e){el.innerHTML='<div class="hint">Falha no rastro: '+e+'</div>';}
 }
-$('adopt-all').onclick=async()=>{let n=0;for(const [h,o] of layers){if(adopted.size>=500)break;if(!o.mine&&!adopted.has(h)){adopted.add(h);stash(h,boundsCache.get(h));n++;}}
-  await save();paintGrid();refresh();$('msg2').textContent=n+' adotado(s) desta vista (max 500).';};
-$('adopt-clear').onclick=async()=>{if(!confirm('Abandonar TODOS os quadrantes?'))return;
-  adopted.clear();await save();paintGrid();renderList();refresh();};
+$('adopt-all').onclick=()=>busy('adopt-all',async()=>{let n=0;for(const [h,o] of layers){if(adopted.size>=500)break;if(!o.mine&&!adopted.has(h)){adopted.add(h);stash(h,boundsCache.get(h));n++;}}
+  await save();paintGrid();refresh();toast(n?n+' adotado(s) desta vista (max 500).':'Nada novo nesta vista.',n?'ok':'warn');});
+$('adopt-clear').onclick=async()=>{if(!await confirmModal('Limpar vista?','Abandona TODOS os quadrantes adotados.'))return;
+  adopted.clear();await save();paintGrid();renderList();refresh();toast('Quadrantes abandonados.','warn');};
 async function startRun(){
   if(runStateRunning)return;
   const btns=[...document.querySelectorAll('button.go')];
   btns.forEach(b=>b.disabled=true);
   try{
     const r=await fetch('/api/run',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
-    if(r.status===409){msg('Já tem rodada em andamento — acompanhe em ☰ Tarefas.');show('tasks');return;}
+    if(r.status===409){toast('Já tem rodada em andamento — acompanhe em ☰ Tarefas.','warn');show('tasks');return;}
+    if(!r.ok){toast('Falha ao iniciar rodada.','err');return;}
     show('tasks');refreshRun();
   }finally{document.querySelectorAll('button.go').forEach(b=>b.disabled=false);}
 }
 let runStateRunning=false;
 $('run1').onclick=startRun;$('run2').onclick=startRun;
+// Itens da rodada entram por append (nunca reescreve o que ja esta na tela).
+let runSeen=0,runSeenStart='';
+function runRowHtml(it){
+  const cls=it.phase==='erro'?'err':(it.result==='reported'||it.created?'ok':'run');
+  const nm=it.h3?('▦ '+short12(it.h3)):('task '+esc(String(it.taskId||'').slice(0,8)));
+  let d=esc(it.phase);
+  if(it.observation)d+=' · '+esc(String(it.observation).slice(0,20));
+  if(it.score!=null)d+=' · score '+Number(it.score).toFixed(2);
+  if(it.result==='reported')d+=' → '+esc(it.decision||'?')+(it.eventId?' · ev '+esc(String(it.eventId).slice(0,8)):' · 1/2 votos');
+  if(it.error)d+=' · '+esc(it.error);
+  if(it.ms!=null)d+=' · '+(it.ms/1000).toFixed(1)+'s';
+  return '<div class="row"><span class="grow">'+esc(nm)+' — '+d+'</span><span class="pill '+cls+'">'+esc(it.phase)+'</span></div>';
+}
 async function refreshRun(){
   const j=await (await fetch('/api/run/state')).json();const s=j.state;
   runStateRunning=!!s.running;
   const box=$('runbox');
-  let html='<div class="row"><span class="grow">Estado</span>'+
-    (s.running?'<span class="pill run"><span class="spin">◌</span> RODANDO</span>':'<span class="pill ok">PARADO</span>')+'</div>';
-  if(s.running&&s.current)html+='<div class="row"><span class="grow">⏳ '+s.current+'</span></div>';
-  const shown=s.items.slice(-150);
-  if(s.items.length>shown.length)html+='<div class="hint">mostrando '+shown.length+' de '+s.items.length+' itens…</div>';
-  for(const it of shown){
-    const cls=it.phase==='erro'?'err':(it.result==='reported'||it.created?'ok':'run');
-    const nm=it.h3?('▦ '+short12(it.h3)):('task '+String(it.taskId||'').slice(0,8));
-    let d=it.phase;
-    if(it.observation)d+=' · '+String(it.observation).slice(0,20);
-    if(it.score!=null)d+=' · score '+Number(it.score).toFixed(2);
-    if(it.result==='reported')d+=' → '+(it.decision||'?')+(it.eventId?' · ev '+String(it.eventId).slice(0,8):' · 1/2 votos');
-    if(it.error)d+=' · '+it.error;
-    if(it.ms!=null)d+=' · '+(it.ms/1000).toFixed(1)+'s';
-    html+='<div class="row"><span class="grow">'+nm+' — '+d+'</span><span class="pill '+cls+'">'+it.phase+'</span></div>';
+  if(s.startedAt!==runSeenStart){runSeenStart=s.startedAt;runSeen=0;box.innerHTML='';}
+  let html='';
+  if(runSeen===0){
+    html+='<div class="row" data-k="st"><span class="grow">Estado</span>'+
+      (s.running?'<span class="pill run"><span class="spin">◌</span> RODANDO</span>':'<span class="pill ok">PARADO</span>')+'</div>';
+  }else{
+    const st=box.querySelector('[data-k="st"] .pill');
+    if(st)st.outerHTML=s.running?'<span class="pill run"><span class="spin">◌</span> RODANDO</span>':'<span class="pill ok">PARADO</span>';
   }
-  if(s.summary)html+='<div class="row"><span class="grow">'+s.summary+'</span></div>';
-  box.innerHTML=html;
+  if(s.running&&s.current){
+    let cur=box.querySelector('[data-k="cur"] span');
+    if(!cur){html+='<div class="row" data-k="cur"><span class="grow">⏳ '+esc(s.current)+'</span></div>';}
+    else cur.textContent='⏳ '+s.current;
+  }
+  const items=s.items||[];
+  const fresh=items.slice(runSeen);
+  for(const it of fresh.slice(-150))html+=runRowHtml(it);
+  runSeen=items.length;
+  if(s.summary){
+    let sm=box.querySelector('[data-k="sum"] span');
+    if(!sm)html+='<div class="row" data-k="sum"><span class="grow">'+esc(s.summary)+'</span></div>';
+    else sm.textContent=s.summary;
+  }
+  if(html){const t=document.createElement('div');t.innerHTML=html;while(t.firstChild)box.appendChild(t.firstChild);}
   if(s.running&&!poll)poll=setInterval(refreshRun,2000);
   if(!s.running&&poll){clearInterval(poll);poll=null;}
   if(wasRunning&&!s.running){if(evOn)loadEvents();refresh();}
