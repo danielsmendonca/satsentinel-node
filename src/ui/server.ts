@@ -939,6 +939,20 @@ async function showHist(h){
             '<span style="position:absolute;top:4px;left:4px;font-size:10px;background:rgba(2,6,23,.75);color:#00f2fe;padding:1px 6px;border-radius:99px">AGORA</span>'+
             '</div></span></div>';
         }
+        // F2: fita temporal — cada passagem com nota do voto (clique amplia).
+        const strip=[...pairs].reverse();
+        html+='<div class="row"><span class="grow"><b>🎞 LINHA DO TEMPO</b><br><small style="color:var(--dim)">cada foto = uma passagem votada · clique amplia</small></span></div>';
+        html+='<div class="row"><div style="display:flex;gap:8px;overflow-x:auto;padding:4px 0">';
+        for(const p of strip){
+          const v=(d.votes||[]).find(x=>x.task_id===p.task)||{};
+          const sc=(v.model_score!=null)?Number(v.model_score).toFixed(2):'?';
+          const when=new Date(p.mtime||Date.now()).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});
+          const dot=Number(v.model_score||0)>=0.1?'🔴':'⚪';
+          html+='<a href="'+p.t0+'" target="_blank" rel="noopener" style="flex:0 0 auto;width:104px;text-decoration:none">'+
+            '<img loading="lazy" src="'+p.t0+'" style="width:104px;height:104px;object-fit:cover;border-radius:8px;border:1px solid #1e293b" alt="passagem">'+
+            '<div style="font-size:10px;color:var(--dim);text-align:center">'+dot+' '+when+' · '+sc+'</div></a>';
+        }
+        html+='</div></div>';
       }
     }catch(e2){/* sem thumbs: timeline segue */}
     el.innerHTML=html;
