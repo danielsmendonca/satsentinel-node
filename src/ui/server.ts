@@ -542,12 +542,13 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 </div>
 <aside id="panel" class="absolute top-2 right-14 bottom-2 w-[min(380px,90vw)] z-[1100] overflow-y-auto rounded-xl bg-slate-950/90 backdrop-blur-md border border-slate-800/80 p-3" style="display:none">
 <section id="v-cells">
-<div class="text-xs text-slate-400 mb-2">Toque nos <b>cinzas</b> para <b class="text-emerald-400">adotar</b>, nos verdes para soltar. Zoom 8+.</div>
-<div class="flex gap-2 mb-2"><button id="adopt-all" class="flex-1 text-sm px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 btn-glow">➕ Visíveis</button>
-<button id="adopt-clear" class="text-sm px-3 py-2 rounded-lg border border-rose-500/60 text-rose-300">Limpar</button></div>
+<div class="text-xs text-slate-400 mb-2">Toque num quadrante para <b>ver info</b> e adotar. Adotados ficam <b class="text-emerald-400">verdes</b>. Zoom 8+.</div>
+<div class="flex gap-2 mb-2"><button id="adopt-all" class="flex-1 text-sm px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 btn-glow">➕ Adotar visíveis</button>
+<button id="adopt-clear" class="text-sm px-3 py-2 rounded-lg border border-rose-500/60 text-rose-300">Abandonar todos</button></div>
 <div id="msg2" class="text-xs text-slate-500 mb-2"></div>
-<div id="hist"></div>
+<button id="run3" class="go btn-go w-full bg-emerald-950 text-emerald-300 border border-emerald-400 rounded-xl p-3 font-semibold mb-2">▶ VOTAR ADOTADOS</button>
 <div id="list"></div>
+<div id="hist"></div>
 </section>
 <section id="v-tasks" style="display:none">
 <div class="flex items-center gap-2 text-sm bg-slate-900/60 border border-slate-800 rounded-xl p-2.5 mb-2"><span class="flex-1">Automático <span class="text-slate-500 text-xs">(vigia + vota sozinho)</span></span>
@@ -575,7 +576,7 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 <textarea id="cfg-import" rows="3" placeholder="Cole o operator.key aqui para importar" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-xs font-mono mb-2"></textarea>
 <button id="cfg-do-import" class="text-sm px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 btn-glow mb-3"><i data-lucide="upload" class="w-4 h-4 inline"></i> Importar</button>
 <div class="text-xs text-slate-500 mb-1">ZONA DE PERIGO</div>
-<button id="cfg-clear" class="text-sm px-3 py-2 rounded-lg border border-rose-500/60 text-rose-300">Abandonar todos os quadrantes</button>
+<div class="hint">Gerencie os quadrantes pela aba Quadrantes (seleção, lote e abandono com confirmação).</div>
 <div id="cfg-msg" class="text-xs text-slate-500 mt-2"></div>
 </section>
 </aside>
@@ -795,8 +796,6 @@ $('cfg-do-import').onclick=()=>busy('cfg-do-import',async()=>{try{const v=JSON.p
     const r=await fetch('/api/pairing/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(v)});
     toast(r.ok?'Chave importada. Recarregue a página.':'Falha na importação.',r.ok?'ok':'err');}
   catch(e){toast('JSON inválido.','err');}});
-$('cfg-clear').onclick=async()=>{if(!await confirmModal('Abandonar tudo?','Todos os quadrantes adotados serão removidos deste nó.'))return;
-  adopted.clear();await save();paintMine();renderList();refresh();toast('Todos abandonados.','warn');};
 const hhmm=iso=>{try{return new Date(iso).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});}catch(e){return '?';}};
 let actSig='';
 async function loadActivity(){
@@ -945,7 +944,7 @@ async function loadGrid(force){
     }
     for(const [h,o] of [...layers]){if(!o.mine&&!seen.has(h)){map.removeLayer(o.poly);layers.delete(h);}}
     paintGrid();
-    $('msg2').textContent=j.data?.truncated?'Grade parcial — aproxime mais.':'Toque nos cinzas para adotar, nos verdes para soltar.';
+    $('msg2').textContent=j.data?.truncated?'Grade parcial — aproxime mais.':'Toque num quadrante para ver info e adotar.';
     if(nc)save();
   }catch(e){if(my===seq)$('msg2').textContent='Falha na grade: '+(e?.message||e);}
 }
@@ -979,27 +978,76 @@ async function goTo(h){
     if(o){o.poly.setStyle({color:'#38e1ff',weight:4});if(o.poly.bringToFront)o.poly.bringToFront();}
     setTimeout(()=>{paintMine();paintGrid();},2600);},1350);
 }
+// P1: tap SELECIONA (popup de info + ação explícita). Nunca adota/abandona
+// direto: toque acidental não pode mudar monitoramento.
 async function tap(h){
   if(view!=='cells')return;
-  if(!adopted.has(h)){adopted.add(h);stash(h,boundsCache.get(h));}
-  else adopted.delete(h);
-  await save();paintGrid();refresh();
+  const mine=adopted.has(h);
+  const c=centerOf(h);
+  const html='<code>'+esc(short12(h))+'</code><br>'+
+    '<small>'+(c?c[0].toFixed(3)+','+c[1].toFixed(3):'sem posição')+' · '+(mine?'adotado':'não adotado')+'</small><br>'+
+    (mine?'<button data-tap-un>Abandonar</button> ':'<button data-tap-ad>➕ Adotar</button> ')+
+    '<button data-tap-hist>📜 rastro</button>';
+  const o=layers.get(h);
+  const open=()=>{const root=document.querySelector('.leaflet-popup-content');
+    const ad=root?.querySelector('[data-tap-ad]'),un=root?.querySelector('[data-tap-un]'),hi=root?.querySelector('[data-tap-hist]');
+    if(ad)ad.addEventListener('click',async()=>{adopted.add(h);stash(h,boundsCache.get(h));await save();paintGrid();refresh();map.closePopup();toast('Quadrante adotado.','ok');});
+    if(un)un.addEventListener('click',async()=>{await unadoptMine(h);map.closePopup();toast('Quadrante abandonado.','warn');});
+    if(hi)hi.addEventListener('click',()=>{map.closePopup();showHist(h);});};
+  if(o){o.poly.bindPopup(html).openPopup();open();}
+  else{map.openPopup(html,c||map.getCenter());open();}
 }
 map.on('moveend',()=>{clearTimeout(deb);deb=setTimeout(()=>{if(view==='cells'||view==='map')loadGrid();},300);});
 document.getElementById('geo').onclick=()=>{navigator.geolocation?.getCurrentPosition(
   p=>map.setView([p.coords.latitude,p.coords.longitude],9),
   ()=>msg('GPS indisponível. Navegue manualmente.'));};
+// P3: lista com busca + multisselecao + lote. Coordenadas sao contexto local
+// gratuito (sem request); badges de servidor por linha foram descartados
+// (1 request/linha x 500 = anti-economico; fica para a F5).
+let listFilter='',listSel=new Set();
 function renderList(){
   const el=$('list');
   if(adopted.size===0){el.innerHTML='<div class="hint">Nenhum adotado. Vá em ➕ Adotar.</div>';return;}
-  el.innerHTML=[...adopted].map(h=>'<div class="row"><span class="grow"><code>'+esc(h)+'</code></span>'+
-    '<button class="act" data-hist="'+h+'">📜</button>'+
-    (centers[h]?'<button class="act" data-go="'+h+'">📍 ver</button>':'<span class="pill">sem posição</span>')+
-    '<button class="danger" data-un="'+h+'">Abandonar</button></div>').join('');
+  for(const h of [...listSel])if(!adopted.has(h))listSel.delete(h);
+  const q=listFilter.trim().toLowerCase();
+  const rows=[...adopted].filter(h=>!q||h.toLowerCase().includes(q));
+  let html='<div class="row"><span class="grow">'+
+    '<input id="list-q" type="search" placeholder="filtrar…" value="'+esc(listFilter)+'" aria-label="Filtrar quadrantes" style="width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:13px;color:#e2e8f0">'+
+    '</span><button class="act" id="list-all" title="Selecionar visíveis">✓</button></div>';
+  if(!rows.length)html+='<div class="hint">Nenhum registro encontrado para “'+esc(listFilter)+'”.</div>';
+  html+=rows.map(h=>{
+    const c=centerOf(h);
+    const co=c?(' <small style="color:var(--dim)">'+c[0].toFixed(2)+','+c[1].toFixed(2)+'</small>'):'';
+    const on=listSel.has(h);
+    return '<div class="row"><input type="checkbox" data-sel="'+esc(h)+'" aria-label="Selecionar '+esc(short12(h))+'"'+(on?' checked':'')+' style="width:20px;height:20px">'+
+    '<span class="grow"><code>'+esc(short12(h))+'</code>'+co+'</span>'+
+    '<button class="act" data-hist="'+esc(h)+'">📜</button>'+
+    (centers[h]?'<button class="act" data-go="'+esc(h)+'">📍 ver</button>':'<span class="pill">sem posição</span>')+
+    '<button class="danger" data-un="'+esc(h)+'">Abandonar</button></div>';}).join('');
+  if(listSel.size)html+='<div class="row"><span class="grow"><b>'+listSel.size+' selecionado(s)</b></span>'+
+    '<button class="danger" id="bulk-un">Abandonar</button><button class="act" id="bulk-clear">Limpar seleção</button></div>';
+  const active=document.activeElement?.id;
+  const caret=(active==='list-q')?$('list-q')?.selectionStart:null;
+  el.innerHTML=html;
+  const qi=$('list-q');
+  qi.addEventListener('input',()=>{listFilter=qi.value;renderList();});
+  if(active==='list-q'){const nq=$('list-q');nq.focus();try{nq.setSelectionRange(caret,caret);}catch(e){}}
   el.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>goTo(b.dataset.go));
   el.querySelectorAll('[data-hist]').forEach(b=>b.onclick=()=>showHist(b.dataset.hist));
   el.querySelectorAll('[data-un]').forEach(b=>b.onclick=async()=>{
-    adopted.delete(b.dataset.un);await save();paintMine();renderList();refresh();});
+    adopted.delete(b.dataset.un);listSel.delete(b.dataset.un);await save();paintMine();renderList();refresh();});
+  el.querySelectorAll('[data-sel]').forEach(b=>b.onchange=()=>{
+    if(b.checked)listSel.add(b.dataset.sel);else listSel.delete(b.dataset.sel);renderList();});
+  const all=$('list-all');
+  if(all)all.onclick=()=>{const vis=rows.filter(h=>!listSel.has(h));const add=vis.length>0;
+    for(const h of rows){if(add)listSel.add(h);else listSel.delete(h);}renderList();};
+  const bu=$('bulk-un');
+  if(bu)bu.onclick=async()=>{
+    if(!await confirmModal('Abandonar '+listSel.size+' selecionados?','Saem do monitoramento deste nó.'))return;
+    for(const h of [...listSel])adopted.delete(h);
+    listSel.clear();await save();paintMine();renderList();refresh();toast('Selecionados abandonados.','warn');};
+  const bc=$('bulk-clear');
+  if(bc)bc.onclick=()=>{listSel.clear();renderList();};
 }
 async function showHist(h){
   const el=$('hist');
@@ -1063,9 +1111,15 @@ async function showHist(h){
     icons();
   }catch(e){el.innerHTML='<div class="hint">Falha no rastro: '+e+'</div>';}
 }
-$('adopt-all').onclick=()=>busy('adopt-all',async()=>{let n=0;for(const [h,o] of layers){if(adopted.size>=500)break;if(!o.mine&&!adopted.has(h)){adopted.add(h);stash(h,boundsCache.get(h));n++;}}
-  await save();paintGrid();refresh();toast(n?n+' adotado(s) desta vista (max 500).':'Nada novo nesta vista.',n?'ok':'warn');});
-$('adopt-clear').onclick=async()=>{if(!await confirmModal('Limpar vista?','Abandona TODOS os quadrantes adotados.'))return;
+$('adopt-all').onclick=()=>busy('adopt-all',async()=>{
+  const cands=[...layers].filter(([h,o])=>!o.mine&&!adopted.has(h)&&adopted.size<500);
+  if(!cands.length){toast('Nada novo nesta vista.','warn');return;}
+  if(!await confirmModal('Adotar '+cands.length+' quadrantes?','Os quadrantes cinzas desta vista passam a ser monitorados e votados.'))return;
+  let n=0;for(const [h] of cands){if(adopted.size>=500)break;adopted.add(h);stash(h,boundsCache.get(h));n++;}
+  await save();paintGrid();refresh();toast(n+' adotado(s) desta vista (max 500).','ok');});
+$('adopt-clear').onclick=async()=>{
+  if(!adopted.size){toast('Nada para abandonar.','warn');return;}
+  if(!await confirmModal('Abandonar '+adopted.size+' quadrantes?','Todos deixam de ser monitorados por este nó.'))return;
   adopted.clear();await save();paintGrid();renderList();refresh();toast('Quadrantes abandonados.','warn');};
 async function startRun(){
   if(runStateRunning)return;
@@ -1079,7 +1133,7 @@ async function startRun(){
   }finally{document.querySelectorAll('button.go').forEach(b=>b.disabled=false);}
 }
 let runStateRunning=false;
-$('run1').onclick=startRun;$('run2').onclick=startRun;
+$('run1').onclick=startRun;$('run2').onclick=startRun;$('run3').onclick=startRun;
 // Itens da rodada entram por append (nunca reescreve o que ja esta na tela).
 let runSeen=0,runSeenStart='';
 function runRowHtml(it){
