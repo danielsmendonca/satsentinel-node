@@ -19,6 +19,21 @@ test('resolveThumbFile: valido dentro da raiz; resto rejeita', () => {
   assert.equal(resolveThumbFile(dir, H3, TASK, 't0').includes('..'), false);
 });
 
+test('UI: /api/run/state expoe progresso (feitos/total/ritmo)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'uirun-'));
+  const app = await buildLocalUi(dir);
+  try {
+    const r = await app.inject('/api/run/state');
+    assert.equal(r.statusCode, 200);
+    const pg = r.json().progress;
+    for (const k of ['ensuresTotal', 'ensuresDone', 'votesDone', 'failsDone', 'elapsedMs', 'avgEnsureMs']) {
+      assert.equal(typeof pg[k], 'number', k);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
 test('UI: config grava atomico e leitura usa cache invalidado', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'uicfg-'));
   const app = await buildLocalUi(dir);

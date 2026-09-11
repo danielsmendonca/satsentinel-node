@@ -8,10 +8,12 @@ import { runOnceDetailed, getSession, type RunDetail } from '../runner.js';
 interface RunItem {
   h3?: string; phase: string; ms?: number; taskId?: string; observation?: string; score?: number;
   created?: boolean; result?: string; eventId?: string | null; decision?: string; error?: string;
+  kind?: 'ensure' | 'vote';
 }
 interface RunState {
   running: boolean; startedAt: string | null; finishedAt: string | null;
   current: string | null; items: RunItem[]; summary: string | null;
+  totalCells?: number;
 }
 const idleState = (): RunState => ({ running: false, startedAt: null, finishedAt: null, current: null, items: [], summary: null });
 let runState: RunState = idleState();
@@ -124,10 +126,11 @@ async function doRun(configDir: string): Promise<void> {
     // Fila completa: garante task para TODAS as adotadas (x4 paralelo).
     // Redundante é barato (ON CONFLICT DO NOTHING) e o ociosidade do homelab absorve.
     const lote = adopted.slice(0, 500);
+    runState.totalCells = lote.length;
     runState.current = `garantindo tasks (${lote.length} quadrantes, x4 paralelo)…`;
     await mapLimit(lote, 4, async (h) => {
       runState.current = `garantindo tasks (${runState.items.length}/${lote.length})…`;
-      const item: RunItem = { h3: h, phase: 'ensure' };
+      const item: RunItem = { h3: h, phase: 'ensure', kind: 'ensure' };
       runState.items.push(item);
       const t1 = Date.now();
       try {
@@ -168,6 +171,7 @@ async function doRun(configDir: string): Promise<void> {
           throw e;
         }
         runState.items.push({
+          kind: 'vote',
           phase: d.status === 'idle' ? 'fila vazia' : d.status === 'failed' ? 'falha' : 'voto',
           ms: Date.now() - t1, taskId: d.taskId, h3: d.h3, score: d.score, result: d.status,
           eventId: d.eventId, decision: d.decision, error: (d as { error?: string }).error,
@@ -419,7 +423,24 @@ export async function buildLocalUi(configDir = 'config') {
     logEvent('info', `auto ${body.enabled ? `ligado ${minutes}min` : 'desligado'}`);
     return { ok: true, enabled: !!body.enabled, minutes, next_at: autoNextAt };
   });
-  app.get('/api/run/state', async () => ({ ok: true, state: runState }));
+  app.get('/api/run/state', async () => {
+    const items = runState.items;
+    const ens = items.filter((x) => x.kind === 'ensure');
+    const ensDone = ens.filter((x) => x.phase !== 'ensure').length;
+    const votes = items.filter((x) => x.kind === 'vote');
+    const end = runState.finishedAt ?? new Date().toISOString();
+    return {
+      ok: true, state: runState,
+      progress: {
+        ensuresTotal: runState.totalCells ?? 0, ensuresDone: ensDone,
+        votesDone: votes.filter((x) => x.result === 'reported').length,
+        failsDone: votes.filter((x) => x.result === 'failed').length,
+        idleHits: votes.filter((x) => x.result === 'idle').length,
+        elapsedMs: runState.startedAt ? Math.max(0, new Date(end).getTime() - new Date(runState.startedAt).getTime()) : 0,
+        avgEnsureMs: ensDone ? Math.round(ens.filter((x) => x.ms != null).reduce((a, x) => a + (x.ms ?? 0), 0) / Math.max(1, ens.filter((x) => x.ms != null).length)) : 0,
+      },
+    };
+  });
   // Eventos confirmados (proxy p/ Evidence Map do server; celular so fala com :3000).
   app.get('/api/events', async (_req, reply) => {
     const { cfg } = loadOrCreate(configDir);
@@ -1252,17 +1273,45 @@ function runRowHtml(it){
   return '<div class="row"><span class="grow">'+esc(nm)+' — '+d+'</span><span class="pill '+cls+'">'+esc(it.phase)+'</span></div>';
 }
 async function refreshRun(){
-  const j=await (await fetch('/api/run/state')).json();const s=j.state;
+  const j=await (await fetch('/api/run/state')).json();const s=j.state;const pg=j.progress||{};
   runStateRunning=!!s.running;
   const box=$('runbox');
   if(s.startedAt!==runSeenStart){runSeenStart=s.startedAt;runSeen=0;box.innerHTML='';}
+  // Linha de progresso: feitos/total + ETA (ensures) e ritmo (votos). Uma so,
+  // atualizada no lugar — sem duplicar "Estado".
+  const mmss=ms=>{const t=Math.max(0,Math.round(ms/1000));return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');};
+  const eT=Number(pg.ensuresTotal||0),eD=Number(pg.ensuresDone||0);
+  const vD=Number(pg.votesDone||0),fD=Number(pg.failsDone||0);
+  const el=Number(pg.elapsedMs||0);
+  let pgTxt='parado';
+  let pct=100;
+  if(s.running){
+    if(eD<eT){
+      const avg=Number(pg.avgEnsureMs||0);
+      const rem=Math.max(0,eT-eD);
+      const eta=avg?(' · ~'+mmss(rem*avg/4)+' restantes'):'';
+      pct=eT?Math.round(eD/eT*100):100;
+      pgTxt='garantindo tasks '+eD+'/'+eT+eta;
+    }else{
+      const rate=el>15000?((vD+fD)/(el/60000)):0;
+      pgTxt=vD+' voto(s) · '+fD+' falha(s)'+(rate?' · '+rate.toFixed(1)+'/min':'')+' · '+mmss(el)+' decorridos';
+      pct=100;
+    }
+  }else if(s.summary){
+    pgTxt=vD+' voto(s) · '+fD+' falha(s) · '+mmss(el)+' no total';
+  }
   let html='';
   if(runSeen===0){
-    html+='<div class="row" data-k="st"><span class="grow">Estado</span>'+
+    html+='<div class="row" data-k="st"><span class="grow"><b data-k="pg">'+esc(pgTxt)+'</b>'+
+      '<div style="height:6px;border-radius:99px;background:#1e293b;margin-top:6px"><div data-k="bar" style="height:6px;border-radius:99px;background:#00f2fe;width:'+pct+'%"></div></div></span>'+
       (s.running?'<span class="pill run"><span class="spin">◌</span> RODANDO</span>':'<span class="pill ok">PARADO</span>')+'</div>';
   }else{
     const st=box.querySelector('[data-k="st"] .pill');
     if(st)st.outerHTML=s.running?'<span class="pill run"><span class="spin">◌</span> RODANDO</span>':'<span class="pill ok">PARADO</span>';
+    const tx=box.querySelector('[data-k="pg"]');
+    if(tx)tx.textContent=pgTxt;
+    const bar=box.querySelector('[data-k="bar"]');
+    if(bar)bar.style.width=pct+'%';
   }
   if(s.running&&s.current){
     let cur=box.querySelector('[data-k="cur"] span');
