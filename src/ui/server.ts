@@ -723,7 +723,7 @@ function photoBounds(h, entry){
   for(const p of ll){if(p[0]<s)s=p[0];if(p[0]>n)n=p[0];if(p[1]<w)w=p[1];if(p[1]>e)e=p[1];}
   return [[s,w],[n,e]];
 }
-async function loadPhotoOverlays(){
+async function loadPhotoOverlays(autoFly){
   if(photoLayer){map.removeLayer(photoLayer);photoLayer=null;}
   if(!photoOn)return;
   await ensurePolys();
@@ -731,7 +731,9 @@ async function loadPhotoOverlays(){
   try{all=((await (await fetch('/api/thumbs/all')).json()).data||[]).filter(x=>x.t0&&x.base);}catch(e){return;}
   if(!all.length){toast('Sem fotos ainda — vote para gerar.','warn');return;}
   const b=map.getBounds();
+  const cx=(b.getWest()+b.getEast())/2,cy=(b.getSouth()+b.getNorth())/2;
   const hits=[];
+  const located=[]; // com cantos (p/ "mais proxima" mesmo fora da vista)
   for(const e of all){
     let bd=photoBounds(e.h3,e);
     if(!bd){
@@ -743,13 +745,28 @@ async function loadPhotoOverlays(){
       }catch(_){}
     }
     if(!bd)continue;
+    located.push({e,bd});
     // intersepta a vista?
     if(bd[1][0]<b.getSouth()||bd[0][0]>b.getNorth()||bd[1][1]<b.getWest()||bd[0][1]>b.getEast())continue;
     hits.push({e,bd,mine:adopted.has(e.h3)});
   }
+  if(!hits.length){
+    if(autoFly&&located.length){
+      // leva ate a foto mais proxima do centro atual (so no ligar, nunca no arrastar)
+      located.sort((a,c)=>{const ma=[(a.bd[0][0]+a.bd[1][0])/2,(a.bd[0][1]+a.bd[1][1])/2];
+        const mb=[(c.bd[0][0]+c.bd[1][0])/2,(c.bd[0][1]+c.bd[1][1])/2];
+        return ((ma[0]-cy)**2+(ma[1]-cx)**2)-((mb[0]-cy)**2+(mb[1]-cx)**2);});
+      const best=located[0];
+      toast('Voando até a foto mais próxima…',null);
+      map.flyTo([(best.bd[0][0]+best.bd[1][0])/2,(best.bd[0][1]+best.bd[1][1])/2],10,{duration:1.5});
+      return; // moveend reposiciona e o reload mostra
+    }
+    if(!located.length)toast('Sem fotos localizáveis ainda.','warn');
+    else toast('Nenhuma foto nesta vista — navegue até onde votou.','warn');
+    return;
+  }
   // adotadas primeiro, depois por recencia; max 12
-  hits.sort((a,c)=>(c.mine-a.mine)||((c.e.mtime||0)-(a.e.mtime||0)));
-  if(!hits.length){toast('Nenhuma foto nesta vista — navegue até onde votou.','warn');return;}
+  hits.sort((a,c)=>((c.mine?1:0)-(a.mine?1:0))||((c.e.mtime||0)-(a.e.mtime||0)));
   photoLayer=L.layerGroup().addTo(map);
   for(const {e,bd} of hits.slice(0,12)){
     try{
@@ -763,7 +780,7 @@ async function loadPhotoOverlays(){
   }
   toast(hits.length+' foto(s) nesta vista.',null);
 }
-$('ly-photo').onclick=()=>{photoOn=!photoOn;flipBtn('ly-photo',photoOn);loadPhotoOverlays();};
+$('ly-photo').onclick=()=>{photoOn=!photoOn;flipBtn('ly-photo',photoOn);loadPhotoOverlays(photoOn);};
 flipBtn('ly-photo',false);
 // --- camadas vivas (mosaicos escalares do server) ---
 let liveLayer=null, liveName=null;
