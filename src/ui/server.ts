@@ -172,7 +172,7 @@ async function doRun(configDir: string): Promise<void> {
         }
         runState.items.push({
           kind: 'vote',
-          phase: d.status === 'idle' ? 'fila vazia' : d.status === 'failed' ? 'falha' : 'voto',
+          phase: d.status === 'idle' ? 'fila vazia' : d.status === 'failed' ? 'pulada' : 'voto',
           ms: Date.now() - t1, taskId: d.taskId, h3: d.h3, score: d.score, result: d.status,
           eventId: d.eventId, decision: d.decision, error: (d as { error?: string }).error,
         });
@@ -184,7 +184,7 @@ async function doRun(configDir: string): Promise<void> {
     const novas = runState.items.filter((x) => x.created).length;
     const falhas = runState.items.filter((x) => x.result === 'failed').length;
     const ev = votes.find((x) => x.eventId);
-    const failInfo = falhas > 0 ? ` · ${falhas} falha(s) honestas` : '';
+    const failInfo = falhas > 0 ? ` · ${falhas} pulada(s) (sem céu limpo, tentam depois)` : '';
     runState.summary = votes.length === 0
       ? `💤 ${adopted.length} quadrante(s), ${novas} task(s) nova(s), nenhum voto` +
         (falhas > 0 ? failInfo : ' (fila esvaziada p/ seu operador)')
@@ -284,16 +284,23 @@ export async function buildLocalUi(configDir = 'config') {
   app.get('/api/thumbs', async (req, reply) => {
     const q = req.query as Record<string, string>;
     if (!q.h || !/^[0-9a-f]{15}$/.test(q.h)) return reply.code(400).send({ error: 'h invalido' });
+    const tdir = join(configDir, 'thumbs');
     let files: string[] = [];
-    try { files = readdirSync(join(configDir, 'thumbs')).filter((f) => f.startsWith(`${q.h}_`) && f.endsWith('.png')); } catch { return { data: [] }; }
-    const byTask = new Map<string, { task: string; t0?: string; base?: string; mtime: number }>();
+    try { files = readdirSync(tdir).filter((f) => f.startsWith(`${q.h}_`) && f.endsWith('.png')); } catch { return { data: [] }; }
+    const byTask = new Map<string, { task: string; t0?: string; base?: string; mtime: number; bounds?: { sw: [number, number]; ne: [number, number] } }>();
     for (const f of files) {
       const m = f.match(/^([0-9a-f]{15})_([0-9a-f-]{8,36})_(t0|base)\.png$/);
       if (!m) continue;
       const [, , task, kind] = m;
       let e = byTask.get(task);
       if (!e) { e = { task, mtime: 0 }; byTask.set(task, e); }
-      try { e.mtime = Math.max(e.mtime, statSync(join(configDir, 'thumbs', f)).mtimeMs); } catch { /* some */ }
+      try { e.mtime = Math.max(e.mtime, statSync(join(tdir, f)).mtimeMs); } catch { /* some */ }
+      if (!e.bounds) {
+        try {
+          const meta = JSON.parse(readFileSync(join(tdir, `${q.h}_${task}_meta.json`), 'utf8')) as { sw?: [number, number]; ne?: [number, number] };
+          if (Array.isArray(meta.sw) && Array.isArray(meta.ne)) e.bounds = { sw: meta.sw, ne: meta.ne };
+        } catch { /* thumb antiga, sem sidecar: cliente usa a celula */ }
+      }
       const url = `/api/thumb?h=${q.h}&task=${task}&kind=${kind}`;
       if (kind === 't0') e.t0 = url; else e.base = url;
     }
@@ -535,7 +542,7 @@ button,.act,.danger{min-height:44px;min-width:44px}
 .row .grow{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hint{font-size:12px;color:#64748b}
 .pill{font-size:11px;border:1px solid #334155;border-radius:9999px;padding:2px 9px;color:#94a3b8;white-space:nowrap}
-.pill.ok{color:#34d399;border-color:#34d399}.pill.run{color:#fbbf24;border-color:#fbbf24}.pill.err{color:#f87171;border-color:#f87171}
+.pill.ok{color:#34d399;border-color:#34d399}.pill.run{color:#fbbf24;border-color:#fbbf24}.pill.err{color:#f87171;border-color:#f87171}.pill.skip{color:#38bdf8;border-color:#38bdf8}
 button.act{background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:.5rem;padding:.5rem .75rem;font-size:14px}
 button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;border-radius:.5rem;padding:.5rem .6rem;font-size:13px}
 #msg{font-size:12px}
@@ -584,6 +591,7 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 <button id="ly-grid" title="Grade H3" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-cyan-400 text-cyan-300 btn-glow"><i data-lucide="grid-3x3" class="w-5 h-5"></i></button>
 <button id="ly-ev" title="Vetores de anomalia" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-rose-400 text-rose-300 btn-glow"><i data-lucide="flame" class="w-5 h-5"></i></button>
 <button id="ly-mine" title="Meu território" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-emerald-400 text-emerald-300 btn-glow"><i data-lucide="hexagon" class="w-5 h-5"></i></button>
+<button id="ly-photo" title="Fotos votadas" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-slate-700 text-slate-400 btn-glow"><i data-lucide="camera" class="w-5 h-5"></i></button>
 <button id="ly-temp" title="Temperatura (Landsat)" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-slate-700 text-slate-400 btn-glow"><i data-lucide="thermometer" class="w-5 h-5"></i></button>
 <button id="ly-veg" title="Vigor NDVI (Sentinel-2)" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-slate-700 text-slate-400 btn-glow"><i data-lucide="leaf" class="w-5 h-5"></i></button>
 </div>
@@ -698,6 +706,44 @@ $('ly-grid').onclick=()=>{gridOn=!gridOn;flipBtn('ly-grid',gridOn);
 $('ly-ev').onclick=()=>{evOn=!evOn;flipBtn('ly-ev',evOn);
   if(evOn)loadEvents();else if(evLayer)map.removeLayer(evLayer);};
 $('ly-mine').onclick=()=>{mineOn=!mineOn;flipBtn('ly-mine',mineOn);paintMine();};
+// FOTOS no mapa: ultima passagem votada ocupando o quadrante (overlay
+// georreferenciado). Max 12 proximas do centro; clique mostra antes x depois.
+let photoOn=false, photoLayer=null, photoDeb=null;
+function photoBounds(h, entry){
+  if(entry.bounds&&Array.isArray(entry.bounds.sw)&&Array.isArray(entry.bounds.ne))return [entry.bounds.sw,entry.bounds.ne];
+  const ll=boundsCache.get(h);
+  if(!ll||!ll.length)return null;
+  let s=90,n=-90,w=180,e=-180;
+  for(const p of ll){if(p[0]<s)s=p[0];if(p[0]>n)n=p[0];if(p[1]<w)w=p[1];if(p[1]>e)e=p[1];}
+  return [[s,w],[n,e]];
+}
+async function loadPhotoOverlays(){
+  if(photoLayer){map.removeLayer(photoLayer);photoLayer=null;}
+  if(!photoOn)return;
+  await ensurePolys();
+  const b=map.getBounds(),cx=(b.getWest()+b.getEast())/2,cy=(b.getSouth()+b.getNorth())/2;
+  const inView=[...adopted].filter(h=>{const ll=boundsCache.get(h);return ll&&ll.some(p=>p[1]>b.getWest()&&p[1]<b.getEast()&&p[0]>b.getSouth()&&p[0]<b.getNorth());});
+  inView.sort((a,b2)=>{const ca=centerOf(a),cb=centerOf(b2);
+    const da=ca?((ca[0]-cy)**2+(ca[1]-cx)**2):1e9,db=cb?((cb[0]-cy)**2+(cb[1]-cx)**2):1e9;return da-db;});
+  photoLayer=L.layerGroup().addTo(map);
+  for(const h of inView.slice(0,12)){
+    try{
+      const tj=await (await fetch('/api/thumbs?h='+encodeURIComponent(h))).json();
+      const entry=(tj.data||[]).find(x=>x.t0&&x.base);
+      if(!entry)continue;
+      const bd=photoBounds(h,entry);
+      if(!bd)continue;
+      const ov=L.imageOverlay(entry.t0,bd,{opacity:0.85,interactive:true}).addTo(photoLayer);
+      ov.bindPopup('<b>🛰 última passagem</b> ▦ '+esc(short12(h))+'<br>'+
+        '<img loading="lazy" src="'+esc(entry.t0)+'" style="width:220px;border-radius:6px" alt="agora"><br>'+
+        '<small> passe o mouse no rastro para o antes · </small><button data-phist="'+esc(h)+'">📜 rastro</button>');
+      ov.on('popupopen',ev=>{ev.popup.getElement()?.querySelector('[data-phist]')?.addEventListener('click',e=>{
+        map.closePopup();showHist(e.target.dataset.phist);});});
+    }catch(e){/* celula sem foto: pula */}
+  }
+}
+$('ly-photo').onclick=()=>{photoOn=!photoOn;flipBtn('ly-photo',photoOn);loadPhotoOverlays();};
+flipBtn('ly-photo',false);
 // --- camadas vivas (mosaicos escalares do server) ---
 let liveLayer=null, liveName=null;
 function liveColor(layer,v){
@@ -1092,7 +1138,8 @@ async function tap(h){
   if(o){o.poly.bindPopup(html).openPopup();open();}
   else{map.openPopup(html,c||map.getCenter());open();}
 }
-map.on('moveend',()=>{clearTimeout(deb);deb=setTimeout(()=>{if(view==='cells'||view==='map')loadGrid();},300);});
+map.on('moveend',()=>{clearTimeout(deb);deb=setTimeout(()=>{if(view==='cells'||view==='map')loadGrid();},300);
+  clearTimeout(photoDeb);photoDeb=setTimeout(()=>{if(photoOn)loadPhotoOverlays();},800);});
 document.getElementById('geo').onclick=()=>{navigator.geolocation?.getCurrentPosition(
   p=>map.setView([p.coords.latitude,p.coords.longitude],9),
   ()=>msg('GPS indisponível. Navegue manualmente.'));};
@@ -1262,7 +1309,7 @@ $('run1').onclick=startRun;$('run2').onclick=startRun;$('run3').onclick=startRun
 // Itens da rodada entram por append (nunca reescreve o que ja esta na tela).
 let runSeen=0,runSeenStart='';
 function runRowHtml(it){
-  const cls=it.phase==='erro'?'err':(it.result==='reported'||it.created?'ok':'run');
+  const cls=it.phase==='erro'?'err':it.phase==='pulada'?'skip':(it.result==='reported'||it.created?'ok':'run');
   const nm=it.h3?('▦ '+short12(it.h3)):('task '+esc(String(it.taskId||'').slice(0,8)));
   let d=esc(it.phase);
   if(it.observation)d+=' · '+esc(String(it.observation).slice(0,20));
@@ -1294,11 +1341,11 @@ async function refreshRun(){
       pgTxt='garantindo tasks '+eD+'/'+eT+eta;
     }else{
       const rate=el>15000?((vD+fD)/(el/60000)):0;
-      pgTxt=vD+' voto(s) · '+fD+' falha(s)'+(rate?' · '+rate.toFixed(1)+'/min':'')+' · '+mmss(el)+' decorridos';
+      pgTxt=vD+' voto(s) · '+fD+' pulada(s)'+(rate?' · '+rate.toFixed(1)+'/min':'')+' · '+mmss(el)+' decorridos';
       pct=100;
     }
   }else if(s.summary){
-    pgTxt=vD+' voto(s) · '+fD+' falha(s) · '+mmss(el)+' no total';
+    pgTxt=vD+' voto(s) · '+fD+' pulada(s) · '+mmss(el)+' no total';
   }
   let html='';
   if(runSeen===0){
@@ -1330,7 +1377,7 @@ async function refreshRun(){
   if(html){const t=document.createElement('div');t.innerHTML=html;while(t.firstChild)box.appendChild(t.firstChild);}
   if(s.running&&!poll)poll=setInterval(refreshRun,2000);
   if(!s.running&&poll){clearInterval(poll);poll=null;}
-  if(wasRunning&&!s.running){if(evOn)loadEvents();refresh();}
+  if(wasRunning&&!s.running){if(evOn)loadEvents();refresh();if(photoOn)loadPhotoOverlays();}
   wasRunning=!!s.running;
 }
 $('auto-t').onclick=async()=>{

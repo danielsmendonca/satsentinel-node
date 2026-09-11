@@ -68,10 +68,12 @@ test('UI: /api/thumbs valida h; /api/thumb 400/404; PNG 200', async () => {
     const { png } = renderNdviThumb(new Float32Array(8 * 8).fill(0.6), 8, 8, null, 8);
     writeFileSync(join(dir, 'thumbs', `${H3}_${TASK}_t0.png`), png);
     writeFileSync(join(dir, 'thumbs', `${H3}_${TASK}_base.png`), png);
+    writeFileSync(join(dir, 'thumbs', `${H3}_${TASK}_meta.json`), JSON.stringify({ sw: [-8.1, -54.9], ne: [-7.9, -54.8] }));
     const list = await app.inject(`/api/thumbs?h=${H3}`);
     assert.equal(list.statusCode, 200);
     assert.equal(list.json().data.length, 1);
     assert.ok(list.json().data[0].t0.endsWith('kind=t0'));
+    assert.deepEqual(list.json().data[0].bounds, { sw: [-8.1, -54.9], ne: [-7.9, -54.8] });
     const img = await app.inject(`/api/thumb?h=${H3}&task=${TASK}&kind=t0`);
     assert.equal(img.statusCode, 200);
     assert.match(img.headers['content-type'], /image\/png/);

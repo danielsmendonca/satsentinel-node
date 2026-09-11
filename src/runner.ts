@@ -13,6 +13,7 @@ import { hexToBytes, bytesToHex } from '@noble/hashes/utils';
 import { ed25519 } from '@noble/curves/ed25519';
 import { signPayload } from '@satsentinel/protocol';
 import { loadOrCreate } from './identity/operator.js';
+import proj4 from 'proj4';
 import { detectWindow, ndvi, medianOf, MIN_VALID_FRAC, PERSIST_IOU_MIN, maskIoU } from './pipeline/ndvi.js';
 import { renderNdviThumb, THUMB_CACHE_KEEP } from './viz/thumb.js';
 import { maskToMultiPolygon } from './pipeline/vectorize.js';
@@ -128,10 +129,12 @@ async function detectEpoch(
  * Exportado p/ validacao live (validation/dual_live.mjs) — producao usa via runOnceDetailed.
  */
 export interface VoteThumbs { t0: Uint8Array; base: Uint8Array; }
+/** Cantos lat/lon da janela votada (p/ overlay no mapa). sw=[lat,lon], ne=[lat,lon]. */
+export interface ThumbBounds { sw: [number, number]; ne: [number, number]; }
 
 export async function processReal(
   lease: Lease, eventClass: 'DEFORESTATION' | 'WATER_BODY_CHANGE',
-): Promise<{ geometry: { type: 'MultiPolygon'; coordinates: number[][][][] } | null; score: number; validFrac: number; persistence?: PersistenceEvidence; thumbs?: VoteThumbs }> {
+): Promise<{ geometry: { type: 'MultiPolygon'; coordinates: number[][][][] } | null; score: number; validFrac: number; persistence?: PersistenceEvidence; thumbs?: VoteThumbs; thumbBounds?: ThumbBounds }> {
   const mgrs = lease.mgrs_tile && lease.mgrs_tile !== 'UNKNOWN'
     ? lease.mgrs_tile : parseMgrsTile(lease.observation_id, {});
   const { def: utmDef } = utmFromMgrs(mgrs);
@@ -186,12 +189,24 @@ export async function processReal(
   // F1 visual: thumbs NDVI t0 (com contorno) + mediana das baselines.
   // Best-effort puro: nunca derruba voto; salva quem chama (runOnceDetailed).
   let thumbs: VoteThumbs | undefined;
+  let thumbBounds: ThumbBounds | undefined;
   try {
     const cur = ndvi(red, nir);
     const med = medianOf(baseNdvis, cur);
     thumbs = {
       t0: renderNdviThumb(cur, ref.width, ref.height, det.count > 0 ? det.mask : null).png,
       base: renderNdviThumb(med, ref.width, ref.height, null).png,
+    };
+    // Cantos da janela em lat/lon (overlay georreferenciado no mapa).
+    const inv = (x: number, y: number): [number, number] => {
+      const [lon, lat] = proj4(utmDef, 'EPSG:4326', [x, y]) as [number, number];
+      return [lat, lon];
+    };
+    const nw = inv(ref.originX, ref.originY);
+    const se = inv(ref.originX + ref.width * ref.res, ref.originY - ref.height * ref.res);
+    thumbBounds = {
+      sw: [Math.min(nw[0], se[0]), Math.min(nw[1], se[1])],
+      ne: [Math.max(nw[0], se[0]), Math.max(nw[1], se[1])],
     };
   } catch { /* sem thumbs, voto segue */ }
   // v1.4 DUAL_EPOCH: confirma na 2a cena antes de votar (R5).
@@ -205,17 +220,17 @@ export async function processReal(
       const persisted = e2.count > 0 && piou >= PERSIST_IOU_MIN;
       const persistence: PersistenceEvidence = { epoch2_scene: epoch2.scene, persist_count: e2.count, persist_iou: +piou.toFixed(3), persisted };
       if (!persisted) {
-        return { geometry: null, score: 0, validFrac: det.validFracT0, persistence, ...(thumbs ? { thumbs } : {}) };
+        return { geometry: null, score: 0, validFrac: det.validFracT0, persistence, ...(thumbs ? { thumbs } : {}), ...(thumbBounds ? { thumbBounds } : {}) };
       }
       const geometry = maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef, 50, 0.25);
-      return { geometry, score: geometry ? det.uncalibrated : 0, validFrac: det.validFracT0, persistence, ...(thumbs ? { thumbs } : {}) };
+      return { geometry, score: geometry ? det.uncalibrated : 0, validFrac: det.validFracT0, persistence, ...(thumbs ? { thumbs } : {}), ...(thumbBounds ? { thumbBounds } : {}) };
     }
   }
   const geometry = det.count > 0
     ? maskToMultiPolygon(det.mask, ref.width, ref.height, ref.originX, ref.originY, ref.res, utmDef, 50, 0.25)
     : null;
   const score = geometry ? det.uncalibrated : 0; // sem feicao >=50px: sem deteccao (Zod exige score<0.1 p/ null)
-  return { geometry, score, validFrac: det.validFracT0, ...(thumbs ? { thumbs } : {}) };
+  return { geometry, score, validFrac: det.validFracT0, ...(thumbs ? { thumbs } : {}), ...(thumbBounds ? { thumbBounds } : {}) };
 }
 
 export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> {
@@ -243,7 +258,7 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
     }).catch(() => undefined);
   }, 120_000);
   try {
-    const { geometry, score, validFrac, persistence, thumbs } = await processReal(lease, eventClass);
+    const { geometry, score, validFrac, persistence, thumbs, thumbBounds } = await processReal(lease, eventClass);
     // F1 visual: thumbs em cache local (nunca no report: raster nao cruza o protocolo).
     let thumbSaved = false;
     if (thumbs) {
@@ -253,14 +268,18 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
         const prefix = `${lease.h3_index}_${lease.task_id}`;
         writeFileSync(join(dir, `${prefix}_t0.png`), thumbs.t0);
         writeFileSync(join(dir, `${prefix}_base.png`), thumbs.base);
+        if (thumbBounds) writeFileSync(join(dir, `${prefix}_meta.json`), JSON.stringify(thumbBounds));
         thumbSaved = true;
-        // LRU simples: passa de 2x o teto, apaga os mais antigos.
-        const files = readdirSync(dir).map((f) => {
+        // LRU simples: passa do teto, apaga os PNGs mais antigos (+ meta irma).
+        const files = readdirSync(dir).filter((f) => f.endsWith('.png')).map((f) => {
           try { return { f, m: statSync(join(dir, f)).mtimeMs }; } catch { return null; }
         }).filter((x): x is { f: string; m: number } => !!x).sort((a, b) => a.m - b.m);
         while (files.length > THUMB_CACHE_KEEP * 2) {
           const old = files.shift();
-          try { unlinkSync(join(dir, old!.f)); } catch { /* ja foi */ }
+          try {
+            unlinkSync(join(dir, old!.f));
+            unlinkSync(join(dir, old!.f.replace(/_(t0|base)\.png$/, '_meta.json')));
+          } catch { /* ja foi */ }
         }
       } catch { /* cache visual nao derruba voto */ }
     }
