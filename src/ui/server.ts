@@ -280,32 +280,38 @@ export async function buildLocalUi(configDir = 'config') {
   });
   // F1 visual: thumbs NDVI geradas no voto (cache local, nunca no protocolo).
   // GET /api/thumbs?h=<h3> -> [{task, t0, base, mtime}] (ate 6 tasks recentes)
+  // GET /api/thumbs/all -> [{h3, task, t0, base, mtime, bounds}] (30 recentes, p/ overlay)
   // GET /api/thumb?h=<h3>&task=<uuid>&kind=t0|base -> image/png
-  app.get('/api/thumbs', async (req, reply) => {
-    const q = req.query as Record<string, string>;
-    if (!q.h || !/^[0-9a-f]{15}$/.test(q.h)) return reply.code(400).send({ error: 'h invalido' });
-    const tdir = join(configDir, 'thumbs');
+  interface ThumbEntry { h3: string; task: string; t0?: string; base?: string; mtime: number; bounds?: { sw: [number, number]; ne: [number, number] } }
+  const listThumbs = (tdir: string, prefix: string): ThumbEntry[] => {
     let files: string[] = [];
-    try { files = readdirSync(tdir).filter((f) => f.startsWith(`${q.h}_`) && f.endsWith('.png')); } catch { return { data: [] }; }
-    const byTask = new Map<string, { task: string; t0?: string; base?: string; mtime: number; bounds?: { sw: [number, number]; ne: [number, number] } }>();
+    try { files = readdirSync(tdir).filter((f) => f.startsWith(prefix) && f.endsWith('.png')); } catch { return []; }
+    const byTask = new Map<string, ThumbEntry>();
     for (const f of files) {
       const m = f.match(/^([0-9a-f]{15})_([0-9a-f-]{8,36})_(t0|base)\.png$/);
       if (!m) continue;
-      const [, , task, kind] = m;
+      const [, h3, task, kind] = m;
       let e = byTask.get(task);
-      if (!e) { e = { task, mtime: 0 }; byTask.set(task, e); }
+      if (!e) { e = { h3, task, mtime: 0 }; byTask.set(task, e); }
       try { e.mtime = Math.max(e.mtime, statSync(join(tdir, f)).mtimeMs); } catch { /* some */ }
       if (!e.bounds) {
         try {
-          const meta = JSON.parse(readFileSync(join(tdir, `${q.h}_${task}_meta.json`), 'utf8')) as { sw?: [number, number]; ne?: [number, number] };
+          const meta = JSON.parse(readFileSync(join(tdir, `${h3}_${task}_meta.json`), 'utf8')) as { sw?: [number, number]; ne?: [number, number] };
           if (Array.isArray(meta.sw) && Array.isArray(meta.ne)) e.bounds = { sw: meta.sw, ne: meta.ne };
         } catch { /* thumb antiga, sem sidecar: cliente usa a celula */ }
       }
-      const url = `/api/thumb?h=${q.h}&task=${task}&kind=${kind}`;
+      const url = `/api/thumb?h=${h3}&task=${task}&kind=${kind}`;
       if (kind === 't0') e.t0 = url; else e.base = url;
     }
-    const list = [...byTask.values()].sort((a, b) => b.mtime - a.mtime).slice(0, 6);
-    return { data: list };
+    return [...byTask.values()].sort((a, b) => b.mtime - a.mtime);
+  };
+  app.get('/api/thumbs', async (req, reply) => {
+    const q = req.query as Record<string, string>;
+    if (!q.h || !/^[0-9a-f]{15}$/.test(q.h)) return reply.code(400).send({ error: 'h invalido' });
+    return { data: listThumbs(join(configDir, 'thumbs'), `${q.h}_`).slice(0, 6) };
+  });
+  app.get('/api/thumbs/all', async (_req, _reply) => {
+    return { data: listThumbs(join(configDir, 'thumbs'), '').slice(0, 30) };
   });
   app.get('/api/thumb', async (req, reply) => {
     const q = req.query as Record<string, string>;
@@ -721,26 +727,41 @@ async function loadPhotoOverlays(){
   if(photoLayer){map.removeLayer(photoLayer);photoLayer=null;}
   if(!photoOn)return;
   await ensurePolys();
-  const b=map.getBounds(),cx=(b.getWest()+b.getEast())/2,cy=(b.getSouth()+b.getNorth())/2;
-  const inView=[...adopted].filter(h=>{const ll=boundsCache.get(h);return ll&&ll.some(p=>p[1]>b.getWest()&&p[1]<b.getEast()&&p[0]>b.getSouth()&&p[0]<b.getNorth());});
-  inView.sort((a,b2)=>{const ca=centerOf(a),cb=centerOf(b2);
-    const da=ca?((ca[0]-cy)**2+(ca[1]-cx)**2):1e9,db=cb?((cb[0]-cy)**2+(cb[1]-cx)**2):1e9;return da-db;});
-  photoLayer=L.layerGroup().addTo(map);
-  for(const h of inView.slice(0,12)){
-    try{
-      const tj=await (await fetch('/api/thumbs?h='+encodeURIComponent(h))).json();
-      const entry=(tj.data||[]).find(x=>x.t0&&x.base);
-      if(!entry)continue;
-      const bd=photoBounds(h,entry);
-      if(!bd)continue;
-      const ov=L.imageOverlay(entry.t0,bd,{opacity:0.85,interactive:true}).addTo(photoLayer);
-      ov.bindPopup('<b>🛰 última passagem</b> ▦ '+esc(short12(h))+'<br>'+
-        '<img loading="lazy" src="'+esc(entry.t0)+'" style="width:220px;border-radius:6px" alt="agora"><br>'+
-        '<small> passe o mouse no rastro para o antes · </small><button data-phist="'+esc(h)+'">📜 rastro</button>');
-      ov.on('popupopen',ev=>{ev.popup.getElement()?.querySelector('[data-phist]')?.addEventListener('click',e=>{
-        map.closePopup();showHist(e.target.dataset.phist);});});
-    }catch(e){/* celula sem foto: pula */}
+  let all=[];
+  try{all=((await (await fetch('/api/thumbs/all')).json()).data||[]).filter(x=>x.t0&&x.base);}catch(e){return;}
+  if(!all.length){toast('Sem fotos ainda — vote para gerar.','warn');return;}
+  const b=map.getBounds();
+  const hits=[];
+  for(const e of all){
+    let bd=photoBounds(e.h3,e);
+    if(!bd){
+      // sem sidecar e sem celula em cache: busca fronteira uma vez
+      try{
+        const r=await fetch('/api/cells?h='+encodeURIComponent(e.h3));const jj=await r.json();
+        const bnd=(jj.data?.cells||[])[0]?.boundary;
+        if(bnd){const ll=bnd.map(p=>[p[0],p[1]]);boundsCache.set(e.h3,ll);bd=photoBounds(e.h3,e);}
+      }catch(_){}
+    }
+    if(!bd)continue;
+    // intersepta a vista?
+    if(bd[1][0]<b.getSouth()||bd[0][0]>b.getNorth()||bd[1][1]<b.getWest()||bd[0][1]>b.getEast())continue;
+    hits.push({e,bd,mine:adopted.has(e.h3)});
   }
+  // adotadas primeiro, depois por recencia; max 12
+  hits.sort((a,c)=>(c.mine-a.mine)||((c.e.mtime||0)-(a.e.mtime||0)));
+  if(!hits.length){toast('Nenhuma foto nesta vista — navegue até onde votou.','warn');return;}
+  photoLayer=L.layerGroup().addTo(map);
+  for(const {e,bd} of hits.slice(0,12)){
+    try{
+      const ov=L.imageOverlay(e.t0,bd,{opacity:0.85,interactive:true}).addTo(photoLayer);
+      ov.bindPopup('<b>🛰 última passagem</b> ▦ '+esc(short12(e.h3))+(adopted.has(e.h3)?' · sua':'')+'<br>'+
+        '<img loading="lazy" src="'+esc(e.t0)+'" style="width:220px;border-radius:6px" alt="agora"><br>'+
+        '<small>passe o mouse no rastro para o antes · </small><button data-phist="'+esc(e.h3)+'">📜 rastro</button>');
+      ov.on('popupopen',ev=>{ev.popup.getElement()?.querySelector('[data-phist]')?.addEventListener('click',x=>{
+        map.closePopup();showHist(x.target.dataset.phist);});});
+    }catch(_){/* pula */}
+  }
+  toast(hits.length+' foto(s) nesta vista.',null);
 }
 $('ly-photo').onclick=()=>{photoOn=!photoOn;flipBtn('ly-photo',photoOn);loadPhotoOverlays();};
 flipBtn('ly-photo',false);

@@ -73,11 +73,30 @@ test('UI: /api/thumbs valida h; /api/thumb 400/404; PNG 200', async () => {
     assert.equal(list.statusCode, 200);
     assert.equal(list.json().data.length, 1);
     assert.ok(list.json().data[0].t0.endsWith('kind=t0'));
-    assert.deepEqual(list.json().data[0].bounds, { sw: [-8.1, -54.9], ne: [-7.9, -54.8] });
-    const img = await app.inject(`/api/thumb?h=${H3}&task=${TASK}&kind=t0`);
+    assert.deepEqual(list.json().data[0].bounds, { sw: [-8.1, -54.9], ne: [-7.9, -54.8] });    const img = await app.inject(`/api/thumb?h=${H3}&task=${TASK}&kind=t0`);
     assert.equal(img.statusCode, 200);
     assert.match(img.headers['content-type'], /image\/png/);
     assert.ok((img.body ?? '').length > 50);
+  } finally {
+    await app.close();
+  }
+});
+
+test('UI: /api/thumbs/all lista votadas com h3+bounds (p/ overlay)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'uiall-'));
+  const app = await buildLocalUi(dir);
+  try {
+    const e0 = await app.inject('/api/thumbs/all');
+    assert.equal(e0.statusCode, 200);
+    assert.deepEqual(e0.json().data, []);
+    mkdirSync(join(dir, 'thumbs'), { recursive: true });
+    const { png } = renderNdviThumb(new Float32Array(8 * 8).fill(0.6), 8, 8, null, 8);
+    writeFileSync(join(dir, 'thumbs', `${H3}_${TASK}_t0.png`), png);
+    writeFileSync(join(dir, 'thumbs', `${H3}_${TASK}_base.png`), png);
+    const l = await app.inject('/api/thumbs/all');
+    assert.equal(l.json().data.length, 1);
+    assert.equal(l.json().data[0].h3, H3);
+    assert.ok(l.json().data[0].t0.includes('/api/thumb?'));
   } finally {
     await app.close();
   }
