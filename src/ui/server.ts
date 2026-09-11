@@ -305,6 +305,26 @@ export async function buildLocalUi(configDir = 'config') {
     if (buf.length < 20 || buf[0] !== 137 || buf[1] !== 80) return reply.code(404).send({ error: 'thumb invalida' });
     return reply.type('image/png').header('cache-control', 'public, max-age=86400').send(buf);
   });
+  // F5 album: lista e bytes vindos do servidor (fotos que outros nos anexaram).
+  app.get('/api/evidencelist', async (req, reply) => {
+    const { cfg } = loadOrCreate(configDir);
+    const q = req.query as Record<string, string>;
+    if (!q.task || !/^[0-9a-f-]{36}$/.test(q.task)) return reply.code(400).send({ error: 'task invalida' });
+    const base = cfg.server_url.replace(/\/$/, '');
+    const r = await fetch(`${base}/v1/evidence?task=${encodeURIComponent(q.task)}`);
+    if (!r.ok) return reply.code(502).send({ error: `server evidence: ${r.status}` });
+    return reply.send(await r.json());
+  });
+  app.get('/api/evidence/:hash', async (req, reply) => {
+    const { cfg } = loadOrCreate(configDir);
+    const p = req.params as { hash: string };
+    if (!/^[0-9a-f]{64}$/.test(p.hash)) return reply.code(400).send({ error: 'hash invalido' });
+    const base = cfg.server_url.replace(/\/$/, '');
+    const r = await fetch(`${base}/v1/evidence/${p.hash}`);
+    if (!r.ok) return reply.code(r.status === 404 ? 404 : 502).send({ error: `server evidence: ${r.status}` });
+    const buf = Buffer.from(await r.arrayBuffer());
+    return reply.type('image/png').header('cache-control', 'public, max-age=86400').send(buf);
+  });
   // Logs: anel local (node) + anel do server (requisicoes).
   app.get('/api/logs', async (req, reply) => {
     const q = req.query as Record<string, string>;
@@ -346,6 +366,14 @@ export async function buildLocalUi(configDir = 'config') {
     const base = cfg.server_url.replace(/\/$/, '');
     const r = await fetch(`${base}/v1/activity?limit=20`);
     if (!r.ok) return reply.code(502).send({ error: `server activity: ${r.status}` });
+    return reply.send(await r.json());
+  });
+  // F4: impacto do operador (proxy; operator_id vem da identidade local).
+  app.get('/api/impact', async (_req, reply) => {
+    const { key, cfg } = loadOrCreate(configDir);
+    const base = cfg.server_url.replace(/\/$/, '');
+    const r = await fetch(`${base}/v1/operators/${encodeURIComponent(key.operator_id)}/impact`);
+    if (!r.ok) return reply.code(502).send({ error: `server impact: ${r.status}` });
     return reply.send(await r.json());
   });
   // Rastro do quadrante (proxy p/ timeline do server).
@@ -509,6 +537,7 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 <button id="n-cells" class="flex items-center gap-3 p-3 rounded-xl text-slate-400 hover:text-cyan-300"><i data-lucide="hexagon" class="w-6 h-6 shrink-0"></i><span class="lbl text-sm">Quadrantes</span></button>
 <button id="n-tasks" class="flex items-center gap-3 p-3 rounded-xl text-slate-400 hover:text-cyan-300"><i data-lucide="list" class="w-6 h-6 shrink-0"></i><span class="lbl text-sm">Tarefas</span></button>
 <button id="n-logs" class="flex items-center gap-3 p-3 rounded-xl text-slate-400 hover:text-cyan-300"><i data-lucide="terminal" class="w-6 h-6 shrink-0"></i><span class="lbl text-sm">Logs</span></button>
+<button id="n-impact" class="flex items-center gap-3 p-3 rounded-xl text-slate-400 hover:text-cyan-300"><i data-lucide="award" class="w-6 h-6 shrink-0"></i><span class="lbl text-sm">Impacto</span></button>
 <button id="n-config" class="flex items-center gap-3 p-3 rounded-xl text-slate-400 hover:text-cyan-300"><i data-lucide="settings" class="w-6 h-6 shrink-0"></i><span class="lbl text-sm">Ajustes</span></button>
 </nav>
 <div class="p-2 hidden md:block"><div class="lbl text-[10px] text-slate-600 px-2">SAT SENTINEL<br><span id="op-side"></span></div></div>
@@ -533,6 +562,7 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 <button id="ly-sat" title="Satélite" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-slate-700 text-slate-400 btn-glow"><i data-lucide="satellite" class="w-5 h-5"></i></button>
 <button id="ly-grid" title="Grade H3" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-cyan-400 text-cyan-300 btn-glow"><i data-lucide="grid-3x3" class="w-5 h-5"></i></button>
 <button id="ly-ev" title="Vetores de anomalia" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-rose-400 text-rose-300 btn-glow"><i data-lucide="flame" class="w-5 h-5"></i></button>
+<button id="ly-mine" title="Meu território" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-emerald-400 text-emerald-300 btn-glow"><i data-lucide="hexagon" class="w-5 h-5"></i></button>
 <button id="ly-temp" title="Temperatura (Landsat)" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-slate-700 text-slate-400 btn-glow"><i data-lucide="thermometer" class="w-5 h-5"></i></button>
 <button id="ly-veg" title="Vigor NDVI (Sentinel-2)" class="p-2.5 rounded-xl bg-slate-900/80 backdrop-blur border border-slate-700 text-slate-400 btn-glow"><i data-lucide="leaf" class="w-5 h-5"></i></button>
 </div>
@@ -563,6 +593,10 @@ button.danger{color:#fb7185;border:1px solid rgba(244,63,94,.4);background:none;
 <div class="flex gap-2 mb-2"><button id="log-node" class="flex-1 text-sm px-3 py-2 rounded-lg bg-slate-800 border border-cyan-400 text-cyan-300">Nó</button>
 <button id="log-server" class="flex-1 text-sm px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-400">Servidor</button></div>
 <div id="logbox" class="font-mono text-xs bg-black/60 border border-slate-800 rounded-xl p-2.5 h-64 overflow-y-auto whitespace-pre-wrap"></div>
+</section>
+<section id="v-impact" style="display:none">
+<div class="text-xs text-slate-500 mb-2">SEU IMPACTO NA REDE</div>
+<div id="impact-box"><div class="hint">⏳ Carregando…</div></div>
 </section>
 <section id="v-config" style="display:none">
 <div class="text-xs text-slate-500 mb-1">OPERADOR</div><div id="cfg-op" class="font-mono text-sm text-cyan-300 mb-3"></div>
@@ -611,7 +645,7 @@ const fmtM=n=>n>=1e6?(n/1e6).toFixed(1).replace('.',',')+'M':String(n??'…');
 const $=id=>document.getElementById(id);
 function msg(t){$('msg').textContent=t;}
 function show(v){view=v;
-  for(const s of ['map','cells','tasks','logs','config']){
+  for(const s of ['map','cells','tasks','logs','impact','config']){
     const vs=$('v-'+s),ns=$('n-'+s);
     if(vs)vs.style.display=s===v?'block':'none';
     if(ns)ns.classList.toggle('on',s===v);}
@@ -623,13 +657,14 @@ function show(v){view=v;
   if(v==='logs'){paintLogSrc();loadLogs();if(logPoll)clearInterval(logPoll);logPoll=setInterval(()=>{if(view==='logs')loadLogs();},5000);}
   else if(logPoll){clearInterval(logPoll);logPoll=null;}
   if(v==='config')renderConfig();
+  if(v==='impact')loadImpact();
   if(v==='map'){ensurePolys().then(paintMine);if(evOn)loadEvents();}
   setTimeout(()=>map.invalidateSize(),50);}
-for(const s of ['map','cells','tasks','logs','config'])$('n-'+s).onclick=()=>show(s);
+for(const s of ['map','cells','tasks','logs','impact','config'])$('n-'+s).onclick=()=>show(s);
 $('side-toggle').onclick=()=>{$('side').classList.toggle('open');setTimeout(()=>map.invalidateSize(),320);};
 function icons(){try{if(window.lucide)lucide.createIcons();}catch(e){}}
 // --- camadas do mapa ---
-let satLayer=null, gridOn=true, evOn=true, logPoll=null;
+let satLayer=null, gridOn=true, evOn=true, mineOn=true, logPoll=null;
 function flipBtn(id,on){const b=$(id);if(b)b.classList.toggle('opacity-40',!on);}
 $('ly-sat').onclick=()=>{const has=!!satLayer&&map.hasLayer(satLayer);
   if(has){map.removeLayer(satLayer);}else{
@@ -641,6 +676,7 @@ $('ly-grid').onclick=()=>{gridOn=!gridOn;flipBtn('ly-grid',gridOn);
   else if(view==='cells')loadGrid(true);};
 $('ly-ev').onclick=()=>{evOn=!evOn;flipBtn('ly-ev',evOn);
   if(evOn)loadEvents();else if(evLayer)map.removeLayer(evLayer);};
+$('ly-mine').onclick=()=>{mineOn=!mineOn;flipBtn('ly-mine',mineOn);paintMine();};
 // --- camadas vivas (mosaicos escalares do server) ---
 let liveLayer=null, liveName=null;
 function liveColor(layer,v){
@@ -797,6 +833,34 @@ $('cfg-do-import').onclick=()=>busy('cfg-do-import',async()=>{try{const v=JSON.p
     toast(r.ok?'Chave importada. Recarregue a página.':'Falha na importação.',r.ok?'ok':'err');}
   catch(e){toast('JSON inválido.','err');}});
 const hhmm=iso=>{try{return new Date(iso).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});}catch(e){return '?';}};
+// F4: aba Impacto — votos, deteccoes, reputacao e alertas que ajudou a criar.
+async function loadImpact(){
+  const el=$('impact-box');
+  if(el)el.innerHTML='<div class="hint">⏳ Carregando…</div>';
+  try{
+    const j=await (await fetch('/api/impact')).json();
+    const d=j.data||{};
+    if(!el)return;
+    let html='<div class="grid grid-cols-3 gap-2 mb-2">'+
+      '<div class="card"><div class="text-[10px] text-slate-500">VOTOS</div><div class="text-lg font-bold">'+Number(d.votos_total||0)+'</div></div>'+
+      '<div class="card"><div class="text-[10px] text-slate-500">DETECÇÕES</div><div class="text-lg font-bold text-rose-300">'+Number(d.votos_deteccao||0)+'</div></div>'+
+      '<div class="card"><div class="text-[10px] text-slate-500">24H</div><div class="text-lg font-bold text-cyan-300">'+Number(d.votos_24h||0)+'</div></div></div>';
+    const rp=d.reputation;
+    html+=rp
+      ?'<div class="row"><span class="grow">🎯 Precisão <b>'+Number(rp.scientific_agreement||0).toFixed(2)+'</b> · operação <b>'+Number(rp.operational_reliability||0).toFixed(2)+'</b><br><small style="color:var(--dim)">'+Number(rp.tasks_completed||0)+' tasks avaliadas</small></span></div>'
+      :'<div class="hint">Sem reputação ainda — vote para estrear.</div>';
+    const evs=d.eventos||[];
+    if(evs.length){
+      html+='<div class="text-xs text-slate-500 mt-2 mb-1">ALERTAS QUE VOCÊ AJUDOU A CRIAR</div>';
+      for(const e of evs){
+        const hot=e.lifecycle_state==='CONFIRMED';
+        html+='<div class="row"><span class="grow">'+(hot?'🔴':'⚪')+' <b>'+esc(e.lifecycle_state||'')+'</b> '+esc(e.event_class||'')+
+          ' · conf '+Number(e.calibrated_confidence||0).toFixed(2)+' · '+hhmm(e.created_at)+'</span></div>';
+      }
+    }else html+='<div class="hint">Nenhum alerta com seu voto ainda.</div>';
+    el.innerHTML=html;
+  }catch(e){if(el)el.innerHTML='<div class="hint">Falha ao carregar impacto.</div>';}
+}
 let actSig='';
 async function loadActivity(){
   try{
@@ -859,17 +923,27 @@ let lastHud='';
 setInterval(async()=>{if(document.hidden||runStateRunning)return;try{await refresh();}catch(e){}},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh().catch(()=>{});});
 function paintMine(){
-  // mapa limpo: adotados só aparecem na aba Quadrantes; no mapa só eventos
-  for(const [h,m] of [...layers]){if(m.mine&&(!adopted.has(h)||view==='map')){map.removeLayer(m.poly);layers.delete(h);}}
+  // F3 territorio: adotados aparecem tambem no mapa (sutil) com toggle proprio.
+  for(const [h,m] of [...layers]){
+    if(!m.mine)continue;
+    if(!adopted.has(h)||(view==='map'&&!mineOn)){map.removeLayer(m.poly);layers.delete(h);continue;}
+    if(view==='map'){
+      if(!map.hasLayer(m.poly))m.poly.addTo(map);
+      m.poly.setStyle({color:'#22ff88',weight:1,fillColor:'#22ff88',fillOpacity:0.15});
+      continue;
+    }
+  }
   if(view==='map')return;
   for(const h of adopted){
     if(layers.has(h))continue;
     const ll=boundsCache.get(h);
     if(!ll)continue;
     const poly=L.polygon(ll,{color:'#22ff88',weight:2,fillColor:'#22ff88',fillOpacity:0.4}).addTo(map);
-    poly.bindPopup('<code>'+esc(h)+'</code><br><button data-unadopt="'+esc(h)+'">Abandonar</button>');
-    poly.on('popupopen',ev=>{ev.popup.getElement()?.querySelector('[data-unadopt]')?.addEventListener('click',async e=>{
-      const hh=e.target.dataset.unadopt;adopted.delete(hh);await save();paintMine();renderList();refresh();});});
+    const infoPopup='<code>'+esc(h)+'</code><br><button data-mhist="'+esc(h)+'">📜 rastro</button>';
+    poly.bindPopup(infoPopup);
+    const wireHist=ev=>{ev.popup.getElement()?.querySelector('[data-mhist]')?.addEventListener('click',e=>{
+      map.closePopup();showHist(e.target.dataset.mhist);});};
+    poly.on('popupopen',wireHist);
     poly.on('click',ev=>{if(view==='cells'){L.DomEvent.stopPropagation(ev);tap(h);}});
     layers.set(h,{poly,mine:true});
   }
@@ -1061,7 +1135,8 @@ async function showHist(h){
     for(const t of d.tasks){
       const obs=String(t.observation_id||'');const base=String(t.baseline_scene||'');
       html+='<div class="row"><span class="grow">📡 '+esc(obs.slice(4,22))+' → base '+esc(base.slice(4,22))+
-        '<br><small style="color:var(--dim)">'+esc(t.event_class)+' · '+esc(t.status)+' '+Number(t.completed_count||0)+'/'+Number(t.redundancy_required||0)+' votos · '+hhmm(t.created_at)+'</small></span></div>';
+        '<br><small style="color:var(--dim)">'+esc(t.event_class)+' · '+esc(t.status)+' '+Number(t.completed_count||0)+'/'+Number(t.redundancy_required||0)+' votos · '+hhmm(t.created_at)+'</small>'+
+        '<span data-evslot="'+esc(String(t.id))+'"></span></span></div>';
       for(const v of d.votes.filter(x=>x.task_id===t.id)){
         html+='<div class="row"><span class="grow" style="padding-left:14px">🗳 @'+esc(String(v.operator_id).slice(0,8))+
           ' · score '+Number(v.model_score).toFixed(2)+' · céu '+Math.round((v.valid_frac||0)*100)+'% · '+hhmm(v.created_at)+'</span></div>';
@@ -1107,6 +1182,35 @@ async function showHist(h){
     el.innerHTML=html;
     el.querySelectorAll('.baswap').forEach(b=>b.addEventListener('click',()=>{
       const off=b.classList.toggle('off');b.setAttribute('aria-pressed',off?'true':'false');}));
+    // F5: fotos da rede (outros nos) por task com deteccao — preenche os slots.
+    for(const t of d.tasks){
+      if(!(d.votes||[]).some(x=>x.task_id===t.id&&Number(x.model_score||0)>=0.1))continue;
+      fetch('/api/evidencelist?task='+encodeURIComponent(t.id)).then(r=>r.json()).then(ej=>{
+        const rows=(ej.data||[]).filter(x=>x.hash&&/^[0-9a-f]{64}$/.test(x.hash));
+        if(!rows.length)return;
+        const slot=el.querySelector('[data-evslot="'+String(t.id).replace(/[^0-9a-f-]/g,'')+'"]');
+        if(!slot)return;
+        const byKind={};for(const r of rows)if(!byKind[r.kind])byKind[r.kind]=r;
+        if(!byKind.t0||!byKind.base)return;
+        const op=esc(String(byKind.t0.operator_id||'').slice(0,8));
+        slot.innerHTML='<br><a href="/api/evidence/'+byKind.t0.hash+'" target="_blank" rel="noopener" style="font-size:11px;color:#00f2fe">📷 fotos da rede (@'+op+')</a> '+
+          '<button data-evshow="'+esc(String(t.id))+'" style="font-size:11px">ver aqui</button>';
+        slot.querySelector('[data-evshow]')?.addEventListener('click',ev=>{
+          ev.preventDefault();
+          const ex=slot.querySelector('[data-evexpand]');
+          if(ex){ex.remove();return;}
+          const dv=document.createElement('div');
+          dv.setAttribute('data-evexpand','1');
+          dv.innerHTML='<div class="baswap" style="position:relative;line-height:0;border-radius:8px;overflow:hidden;border:1px solid #1e293b;margin-top:4px">'+
+            '<img loading="lazy" src="/api/evidence/'+byKind.base.hash+'" style="width:100%;display:block" alt="antes (rede)">'+
+            '<img loading="lazy" src="/api/evidence/'+byKind.t0.hash+'" class="top" style="position:absolute;inset:0;width:100%;height:100%" alt="agora (rede)"></div>'+
+            '<small style="color:var(--dim)">passe o mouse/clique: antes × agora · foto de @'+op+'</small>';
+          slot.appendChild(dv);
+          dv.querySelector('.baswap')?.addEventListener('click',()=>{
+            const bb=dv.querySelector('.baswap');const off=bb.classList.toggle('off');bb.setAttribute('aria-pressed',off?'true':'false');});
+        });
+      }).catch(()=>{});
+    }
     $('hist-back').onclick=()=>{el.innerHTML='';};
     icons();
   }catch(e){el.innerHTML='<div class="hint">Falha no rastro: '+e+'</div>';}

@@ -74,6 +74,7 @@ export interface RunDetail {
   quorum?: string;
   persisted?: boolean;
   thumbs?: boolean;
+  evidence?: boolean;
   error?: string;
 }
 
@@ -278,7 +279,24 @@ export async function runOnceDetailed(configDir = 'config'): Promise<RunDetail> 
     report.signature_hex = signPayload(report, hexToBytes(key.private_key_hex));
     const accepted = await api(base, '/v1/results/report', { method: 'POST', headers: auth, body: JSON.stringify(report) });
     const d = (accepted!.data ?? {}) as { event_id?: string | null; decision?: string; quorum_state?: string };
-    return { status: 'reported', taskId: lease.task_id, h3: lease.h3_index, score, eventId: d.event_id ?? null, decision: d.decision, quorum: d.quorum_state, ...(persistence ? { persisted: persistence.persisted } : {}), ...(thumbSaved ? { thumbs: true } : {}) };
+    // F5 album: anexa thumbs (so com deteccao), FORA do consenso. Best-effort:
+    // falha no upload nunca invalida o voto ja aceito.
+    let evidence = false;
+    if (geometry && thumbs) {
+      try {
+        for (const kind of ['t0', 'base'] as const) {
+          await api(base, '/v1/evidence', {
+            method: 'POST', headers: auth,
+            body: JSON.stringify({
+              task_id: lease.task_id, assignment_id: lease.assignment_id, kind,
+              png_base64: Buffer.from(thumbs[kind]).toString('base64'),
+            }),
+          });
+        }
+        evidence = true;
+      } catch { /* album e opcional */ }
+    }
+    return { status: 'reported', taskId: lease.task_id, h3: lease.h3_index, score, eventId: d.event_id ?? null, decision: d.decision, quorum: d.quorum_state, ...(persistence ? { persisted: persistence.persisted } : {}), ...(thumbSaved ? { thumbs: true } : {}), ...(evidence ? { evidence: true } : {}) };
   } catch (e) {
     // Falha honesta marca FAILED (libera p/ outros, exclui este no). Excecao:
     // 5xx do server (transitorio) -> nao marca; o lease expira e o voto refaz.

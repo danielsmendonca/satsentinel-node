@@ -66,6 +66,19 @@ try {
   const accepted = await api('/v1/results/report', { method: 'POST', headers: auth, body: JSON.stringify(report) });
   clearInterval(hb);
   console.log('report aceito:', JSON.stringify(accepted.data));
+  // F5: anexa thumbs quando houve deteccao (espelha o runner).
+  if (out.geometry && out.thumbs) {
+    for (const kind of ['t0', 'base']) {
+      const r2 = await fetch(`${base}/v1/evidence`, {
+        method: 'POST', headers: { 'content-type': 'application/json', ...auth },
+        body: JSON.stringify({
+          task_id: lease.task_id, assignment_id: lease.assignment_id, kind,
+          png_base64: Buffer.from(out.thumbs[kind]).toString('base64'),
+        }),
+      });
+      console.log(`evidence ${kind}:`, r2.status, (await r2.text()).slice(0, 120));
+    }
+  }
 } catch (e) {
   clearInterval(hb);
   const reason = failReason(e);
